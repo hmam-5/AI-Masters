@@ -6,10 +6,13 @@ from app.services.storage import (
     StorageBackend,
     get_storage_backend,
 )
+from app.services.graph_db import FalkorDBService, get_falkordb
 
 __all__ = [
     "StorageBackend",
     "MinIOBackend",
     "S3Backend",
     "get_storage_backend",
+    "FalkorDBService",
+    "get_falkordb",
 ]

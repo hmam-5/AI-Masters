@@ -14,7 +14,6 @@ from fastapi.responses import JSONResponse
 
 from app.api import router
 from app.config import get_settings
-from app.models.session import init_db
 
 settings = get_settings()
 
@@ -35,11 +34,6 @@ async def lifespan(app: FastAPI):
     """
     # Startup
     logger.info("Starting Brain Tumor AI Framework")
-    try:
-        init_db()
-        logger.info("Database initialized")
-    except Exception as e:
-        logger.error(f"Failed to initialize database: {e}")
 
     # Ensure MinIO buckets exist
     try:
@@ -52,6 +46,15 @@ async def lifespan(app: FastAPI):
                     logger.info(f"Created MinIO bucket: {bucket}")
     except Exception as e:
         logger.error(f"Failed to initialize storage buckets: {e}")
+
+    # Initialize FalkorDB schema
+    try:
+        from app.services.graph_db import get_falkordb
+        graph_db = get_falkordb()
+        graph_db.initialize_schema()
+        logger.info("FalkorDB graph schema initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize FalkorDB: {e}")
 
     yield
 

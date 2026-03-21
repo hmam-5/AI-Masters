@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     """Main settings configuration with validation."""
 
     # Application
-    app_name: str = "Brain Tumor AI Framework"
+    app_name: str = "AI Masters"
     app_version: str = "1.0.0"
     debug: bool = False
     environment: Literal["development", "staging", "production"] = "development"
@@ -27,14 +27,18 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["http://localhost", "http://localhost:3000", "http://localhost:8000"]
     api_prefix: str = "/api/v1"
 
-    # Database
-    database_url: str = "postgresql://brain_tumor_user:secure_password_change_in_prod@localhost:5432/brain_tumor_db"
-    sqlalchemy_echo: bool = False
-
     # Redis & Celery
     redis_url: str = "redis://redis:6379/0"
     celery_broker_url: str = "redis://redis:6379/0"
     celery_result_backend: str = "redis://redis:6379/1"
+
+    # FalkorDB Graph Database
+    falkordb_host: str = "falkordb"
+    falkordb_port: int = 6379
+
+    # Dataset
+    data_dir: str = "/data"
+    combined_dataset_dir: str = "/data/combined"
 
     # Storage (MinIO/S3)
     storage_backend: Literal["minio", "s3"] = "minio"
@@ -58,10 +62,14 @@ class Settings(BaseSettings):
     model_unet_path: str = "/models/unet_3d_segmentation.pth"
     model_resnet_path: str = "/models/resnet3d_classification.pth"
     model_2d_path: str = "/models/brain_tumor_2d.pth"
+    model_resnet50_path: str = "/models/brain_tumor_resnet50.pth"
+    model_efficientnet_path: str = "/models/brain_tumor_efficientnet.pth"
+    model_densenet_path: str = "/models/brain_tumor_densenet.pth"
     image_size: int = 224
     device: str = "cuda"  # 'cuda' or 'cpu'
     inference_batch_size: int = 1
     num_inference_workers: int = 4
+    min_confidence_for_auto_decision: float = 0.99
 
     # Preprocessing
     target_spacing: tuple[float, float, float] = (1.0, 1.0, 1.0)
@@ -86,6 +94,7 @@ class Settings(BaseSettings):
 
         env_file = ".env"
         case_sensitive = False
+        protected_namespaces = ("settings_",)
 
 
 @lru_cache()

@@ -2,13 +2,7 @@
 
 import type {
   AnalysisResult,
-  ClassificationResult,
   ImageAnalyzeResponse,
-  InferenceJob,
-  MRIScan,
-  MRIScanUpload,
-  Patient,
-  SegmentationResult,
 } from "../types/api";
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || "/api/v1";
@@ -50,68 +44,6 @@ class ApiService {
     }
   }
 
-  // Patient endpoints
-  async createPatient(mrn: string, dateOfBirth: string, sex?: string): Promise<Patient> {
-    return this.request<Patient>("POST", "/patients", {
-      mrn,
-      date_of_birth: dateOfBirth,
-      sex,
-    });
-  }
-
-  async getPatient(mrn: string): Promise<Patient> {
-    return this.request<Patient>("GET", `/patients/${mrn}`);
-  }
-
-  // MRI Scan endpoints
-  async uploadMRIScan(
-    patientId: string,
-    files: File[],
-    onProgress?: (progress: number) => void,
-  ): Promise<MRIScanUpload> {
-    const formData = new FormData();
-    files.forEach((file) => {
-      formData.append("files", file);
-    });
-
-    const xhr = new XMLHttpRequest();
-
-    return new Promise((resolve, reject) => {
-      xhr.upload.addEventListener("progress", (event) => {
-        if (event.lengthComputable) {
-          const progress = (event.loaded / event.total) * 100;
-          onProgress?.(progress);
-        }
-      });
-
-      xhr.addEventListener("load", async () => {
-        if (xhr.status === 200) {
-          resolve(JSON.parse(xhr.responseText));
-        } else {
-          reject(new Error(`Upload failed: ${xhr.statusText}`));
-        }
-      });
-
-      xhr.addEventListener("error", () => {
-        reject(new Error("Upload failed"));
-      });
-
-      xhr.open("POST", `${API_BASE_URL}/scans/upload?patient_id=${patientId}`);
-      xhr.send(formData);
-    });
-  }
-
-  // Inference endpoints
-  async startInference(scanId: string): Promise<InferenceJob> {
-    return this.request<InferenceJob>("POST", "/inference/start", {
-      scan_id: scanId,
-    });
-  }
-
-  async getJobStatus(jobId: string): Promise<InferenceJob> {
-    return this.request<InferenceJob>("GET", `/inference/${jobId}`);
-  }
-
   // WebSocket connection
   subscribeToJobStatus(
     jobId: string,
@@ -145,7 +77,7 @@ class ApiService {
     return this.request("GET", "/health");
   }
 
-  // Image Analysis (new simplified flow)
+  // Image Analysis
   async analyzeImage(
     file: File,
     onProgress?: (progress: number) => void,

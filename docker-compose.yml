@@ -1,24 +1,4 @@
 services:
-  # PostgreSQL Database
-  postgres:
-    image: postgres:15-alpine
-    container_name: brain-tumor-postgres
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-brain_tumor_user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secure_password_change_in_prod}
-      POSTGRES_DB: ${POSTGRES_DB:-brain_tumor_db}
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-brain_tumor_user}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - brain-tumor-network
-
   # Redis Cache & Message Broker
   redis:
     image: redis:7-alpine
@@ -29,6 +9,22 @@ services:
       - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - brain-tumor-network
+
+  # FalkorDB Graph Database
+  falkordb:
+    image: falkordb/falkordb:latest
+    container_name: brain-tumor-falkordb
+    ports:
+      - "6381:6379"
+    volumes:
+      - falkordb_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6379", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -63,25 +59,32 @@ services:
       dockerfile: Dockerfile.backend
     container_name: brain-tumor-backend
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql://brain_tumor_user:secure_password_change_in_prod@postgres:5432/brain_tumor_db}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
       STORAGE_BACKEND: ${STORAGE_BACKEND:-minio}
+      FALKORDB_HOST: ${FALKORDB_HOST:-falkordb}
+      FALKORDB_PORT: ${FALKORDB_PORT:-6379}
       DEBUG: ${DEBUG:-false}
       ENVIRONMENT: ${ENVIRONMENT:-development}
+      ENSEMBLE_MODELS: ${ENSEMBLE_MODELS:-custom_cnn,resnet50,efficientnet,densenet}
+      KAGGLE_USERNAME: ${KAGGLE_USERNAME:-}
+      KAGGLE_KEY: ${KAGGLE_KEY:-}
+      KAGGLE_CONFIG_DIR: ${KAGGLE_CONFIG_DIR:-/root/.kaggle}
     ports:
       - "8000:8000"
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
       minio:
         condition: service_healthy
+      falkordb:
+        condition: service_healthy
     volumes:
       - ./backend/app:/app/app
-      - ./models:/models:ro  # Mount trained models
+      - ./models:/models  # Mount trained models
+      - ./data:/data  # Mount dataset directory
+      - ${KAGGLE_VOLUME_PATH:-./.kaggle}:/root/.kaggle:ro
     networks:
       - brain-tumor-network
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
@@ -93,17 +96,24 @@ services:
       dockerfile: Dockerfile.worker
     container_name: brain-tumor-celery
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql://brain_tumor_user:secure_password_change_in_prod@postgres:5432/brain_tumor_db}
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+      FALKORDB_HOST: ${FALKORDB_HOST:-falkordb}
+      FALKORDB_PORT: ${FALKORDB_PORT:-6379}
       CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-0}
+      ENSEMBLE_MODELS: ${ENSEMBLE_MODELS:-custom_cnn,resnet50,efficientnet,densenet}
+      KAGGLE_USERNAME: ${KAGGLE_USERNAME:-}
+      KAGGLE_KEY: ${KAGGLE_KEY:-}
+      KAGGLE_CONFIG_DIR: ${KAGGLE_CONFIG_DIR:-/root/.kaggle}
     depends_on:
       - redis
-      - postgres
       - minio
+      - falkordb
     volumes:
       - ./backend/app:/app/app
-      - ./models:/models:ro
+      - ./models:/models
+      - ./data:/data  # Mount dataset directory
+      - ${KAGGLE_VOLUME_PATH:-./.kaggle}:/root/.kaggle:ro
       - celery_logs:/var/log/celery
     networks:
       - brain-tumor-network
@@ -146,11 +156,11 @@ services:
       - brain-tumor-network
 
 volumes:
-  postgres_data:
-    driver: local
   redis_data:
     driver: local
   minio_data:
+    driver: local
+  falkordb_data:
     driver: local
   celery_logs:
     driver: local

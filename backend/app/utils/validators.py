@@ -160,6 +160,55 @@ class NIfTIValidator:
             raise ImageValidationError(f"4D conversion failed: {str(e)}")
 
 
+class RegularImageValidator:
+    """Validation for regular image files (PNG, JPG, JPEG)."""
+
+    @staticmethod
+    def validate(file_content: bytes) -> dict:
+        """
+        Validate a regular image file and extract metadata.
+
+        Args:
+            file_content: Image file bytes
+
+        Returns:
+            dict: Metadata including shape, format, mode
+
+        Raises:
+            ImageValidationError: If file is corrupted or invalid
+        """
+        try:
+            img = Image.open(io.BytesIO(file_content))
+            img.verify()  # Verify image integrity
+
+            # Re-open after verify (verify can close the file)
+            img = Image.open(io.BytesIO(file_content))
+            width, height = img.size
+
+            if width < 10 or height < 10:
+                raise ImageValidationError(
+                    f"Image too small: {width}x{height} (minimum 10x10)"
+                )
+
+            if width > 10000 or height > 10000:
+                raise ImageValidationError(
+                    f"Image too large: {width}x{height} (maximum 10000x10000)"
+                )
+
+            metadata = {
+                "shape": (height, width),
+                "format": img.format,
+                "mode": img.mode,
+                "size_bytes": len(file_content),
+            }
+
+            return metadata
+        except ImageValidationError:
+            raise
+        except Exception as e:
+            raise ImageValidationError(f"Image validation failed: {str(e)}")
+
+
 class MultimodalValidator:
     """Validation for multi-modal image sets."""
 
@@ -196,55 +245,3 @@ class MultimodalValidator:
             )
 
         return True, "", shapes
-
-
-class RegularImageValidator:
-    """Validation for regular image files (PNG, JPG, JPEG)."""
-
-    ALLOWED_FORMATS = {"PNG", "JPEG", "JPG"}
-    MAX_DIMENSION = 10000
-
-    @staticmethod
-    def validate(file_content: bytes) -> dict:
-        """
-        Validate a regular image file and extract metadata.
-
-        Args:
-            file_content: Image file bytes
-
-        Returns:
-            dict: Metadata including size, mode, format
-
-        Raises:
-            ImageValidationError: If file is corrupted or invalid
-        """
-        try:
-            img = Image.open(io.BytesIO(file_content))
-            img.verify()
-            # Re-open after verify (verify closes the file)
-            img = Image.open(io.BytesIO(file_content))
-
-            fmt = img.format
-            if fmt and fmt.upper() not in RegularImageValidator.ALLOWED_FORMATS:
-                raise ImageValidationError(f"Unsupported image format: {fmt}")
-
-            width, height = img.size
-            if width > RegularImageValidator.MAX_DIMENSION or height > RegularImageValidator.MAX_DIMENSION:
-                raise ImageValidationError(
-                    f"Image too large: {width}x{height} (max {RegularImageValidator.MAX_DIMENSION})"
-                )
-
-            if width < 10 or height < 10:
-                raise ImageValidationError(f"Image too small: {width}x{height}")
-
-            return {
-                "width": width,
-                "height": height,
-                "mode": img.mode,
-                "format": fmt,
-                "channels": len(img.getbands()),
-            }
-        except ImageValidationError:
-            raise
-        except Exception as e:
-            raise ImageValidationError(f"Image validation failed: {str(e)}")

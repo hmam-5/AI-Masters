@@ -57,6 +57,9 @@ build/
 .copilot/
 *.tmp
 
+# Local Kaggle credentials
+.kaggle/
+
 # Data
 models/
 data/
