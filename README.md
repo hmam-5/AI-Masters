@@ -130,6 +130,37 @@ docker compose down -v
 
 ---
 
+## Local Development (Without Docker)
+
+If you want to run the backend and frontend **without Docker** (e.g., for development or quick testing):
+
+### Prerequisites
+
+- **Python 3.11+** (for the backend)
+- **Node.js 18+** (for the frontend)
+
+### Backend
+
+```bash
+cd backend
+pip install -r requirements.txt
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+> **Note:** Some services (Redis, FalkorDB, MinIO) won't be available without Docker. The backend will start with warnings but the API docs will work at http://localhost:8000/docs.
+
+### Frontend
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+The frontend dev server starts at **http://localhost:3000** and proxies `/api` requests to the backend at `localhost:8000`.
+
+---
+
 ## How It Works
 
 ```
@@ -664,28 +695,3 @@ docker compose down -v --rmi all
 ## License
 
 MIT
-| **Nginx** | Reverse proxy |
-| **Docker** | Containerization |
-
----
-
-## Troubleshooting
-
-**Can't open http://localhost?**
-Make sure Docker Desktop is running and you ran `docker compose up --build`. Wait 1-2 minutes.
-
-**Port already in use?**
-Another app is using port 80. Close it or stop the other service.
-
-**Want to start completely fresh?**
-```bash
-docker compose down -v
-docker compose up --build
-```
-
-**Want to see logs?**
-```bash
-docker compose logs backend
-docker compose logs celery-worker
-```
-```
