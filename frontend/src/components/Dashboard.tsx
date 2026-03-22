@@ -89,6 +89,7 @@ const Dashboard: React.FC = () => {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [filePreview, setFilePreview] = useState<string | null>(null);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [isUploading, setIsUploading] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -277,11 +278,13 @@ const Dashboard: React.FC = () => {
     } catch { /* WS optional */ }
   }, [addLog, advanceStage]);
 
-  /* ── Upload handler ──────────────────────────────────────── */
-  const handleUpload = useCallback(async (file: File) => {
+  /* ── File select handler (preview + validation only) ──── */
+  const handleFileSelect = useCallback((file: File) => {
     setSelectedFile(file);
     setError(null);
     setResult(null);
+    setUploadProgress(0);
+    setIsUploading(false);
     setStages(INITIAL_STAGES);
     setModels(INITIAL_MODELS);
     setAgreementScore(0);
@@ -292,29 +295,35 @@ const Dashboard: React.FC = () => {
     reader.readAsDataURL(file);
 
     addLog('info', `File selected: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`);
+  }, [addLog]);
 
-    // Start upload after brief validation animation
-    setTimeout(async () => {
-      try {
-        addLog('info', 'Uploading image to server…');
-        const response = await apiService.analyzeImage(file, (progress) => {
-          setUploadProgress(progress);
-        });
+  /* ── Upload handler (called when user clicks Run Analysis) ── */
+  const handleStartAnalysis = useCallback(async () => {
+    if (!selectedFile) return;
+    setIsUploading(true);
+    setError(null);
 
-        setJobId(response.job_id);
-        setUploadProgress(100);
-        addLog('success', `Upload complete — Job ID: ${response.job_id.substring(0, 8)}…`);
+    try {
+      addLog('info', 'Uploading image to server…');
+      const response = await apiService.analyzeImage(selectedFile, (progress) => {
+        setUploadProgress(progress);
+      });
 
-        // Transition to pipeline view
-        setScreen('pipeline');
-        startPipelineTracking(response.job_id);
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : 'Upload failed';
-        setError(msg);
-        addLog('error', msg);
-      }
-    }, 1500);
-  }, [addLog, startPipelineTracking]);
+      setJobId(response.job_id);
+      setUploadProgress(100);
+      setIsUploading(false);
+      addLog('success', `Upload complete — Job ID: ${response.job_id.substring(0, 8)}…`);
+
+      // Transition to pipeline view
+      setScreen('pipeline');
+      startPipelineTracking(response.job_id);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Upload failed';
+      setError(msg);
+      setIsUploading(false);
+      addLog('error', msg);
+    }
+  }, [selectedFile, addLog, startPipelineTracking]);
 
   /* ── Navigation handler ──────────────────────────────────── */
   const handleNav = useCallback((target: string) => {
@@ -330,6 +339,7 @@ const Dashboard: React.FC = () => {
     setSelectedFile(null);
     setFilePreview(null);
     setUploadProgress(0);
+    setIsUploading(false);
     setJobId(null);
     setResult(null);
     setError(null);
@@ -416,8 +426,10 @@ const Dashboard: React.FC = () => {
             selectedFile={selectedFile}
             filePreview={filePreview}
             uploadProgress={uploadProgress}
+            isUploading={isUploading}
             error={error}
-            onFileSelect={handleUpload}
+            onFileSelect={handleFileSelect}
+            onStartAnalysis={handleStartAnalysis}
           />
         )}
         {screen === 'pipeline' && (

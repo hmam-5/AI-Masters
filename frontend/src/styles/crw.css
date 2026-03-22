@@ -1332,6 +1332,28 @@ body {
 .crw-upload-progress {
   width: 100%; max-width: 700px; margin-top: 20px;
 }
+
+/* ── Run Analysis Button ───────────────────────────────────── */
+.crw-analyze-btn {
+  margin-top: 24px;
+  padding: 14px 48px;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #fff;
+  background: linear-gradient(135deg, var(--cyan), var(--blue));
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  letter-spacing: 0.02em;
+}
+.crw-analyze-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 20px rgba(0, 180, 220, 0.35);
+}
+.crw-analyze-btn:active {
+  transform: translateY(0);
+}
 .crw-progress-bar {
   height: 6px; border-radius: 3px;
   background: var(--border-primary); overflow: hidden;

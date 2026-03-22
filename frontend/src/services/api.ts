@@ -112,6 +112,11 @@ class ApiService {
         reject(new Error("Upload failed - check your connection"));
       });
 
+      xhr.timeout = 30000;
+      xhr.addEventListener("timeout", () => {
+        reject(new Error("Upload timed out — is the backend running?"));
+      });
+
       xhr.open("POST", `${API_BASE_URL}/analyze`);
       xhr.send(formData);
     });

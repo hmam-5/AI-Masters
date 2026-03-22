@@ -4,8 +4,10 @@ interface Props {
   selectedFile: File | null;
   filePreview: string | null;
   uploadProgress: number;
+  isUploading: boolean;
   error: string | null;
   onFileSelect: (file: File) => void;
+  onStartAnalysis: () => void;
 }
 
 interface ValidationStep {
@@ -19,8 +21,10 @@ const SmartIngestion: React.FC<Props> = ({
   selectedFile,
   filePreview,
   uploadProgress,
+  isUploading,
   error,
   onFileSelect,
+  onStartAnalysis,
 }) => {
   const [dragOver, setDragOver] = useState(false);
   const [validationSteps, setValidationSteps] = useState<ValidationStep[]>([
@@ -202,6 +206,23 @@ const SmartIngestion: React.FC<Props> = ({
             <div className="crw-progress-fill" style={{ width: `${uploadProgress}%` }} />
           </div>
           <div className="crw-progress-text">Uploading… {uploadProgress.toFixed(0)}%</div>
+        </div>
+      )}
+
+      {/* Run Analysis Button */}
+      {selectedFile && !isUploading && uploadProgress === 0 && !error && validationSteps.every(s => s.status === 'done') && (
+        <button
+          className="crw-analyze-btn"
+          onClick={onStartAnalysis}
+        >
+          ▶ Run Analysis
+        </button>
+      )}
+
+      {/* Uploading Spinner */}
+      {isUploading && uploadProgress === 0 && (
+        <div className="crw-upload-progress">
+          <div className="crw-progress-text">Connecting to server…</div>
         </div>
       )}
 
