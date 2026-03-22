@@ -2,8 +2,10 @@
 FastAPI API routes for file uploads and inference management.
 
 All persistence is handled via FalkorDB — no SQLAlchemy.
+Includes rate limiting and Redis caching.
 """
 
+import json
 import logging
 import uuid
 from datetime import datetime
@@ -12,11 +14,14 @@ from fastapi import (
     APIRouter,
     File,
     HTTPException,
+    Request,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
     status,
 )
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from app.config import get_settings
 from app.models.database import JobStatus
@@ -32,6 +37,37 @@ from app.workers import run_tumor_inference
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["medical-imaging"])
 settings = get_settings()
+
+# Rate limiter instance (uses the same backend as the one in main.py)
+limiter = Limiter(key_func=get_remote_address, storage_uri=settings.redis_url)
+
+# --- Redis Cache Utility ---
+_redis_cache = None
+
+def _get_redis_cache():
+    """Lazy-init a Redis client for response caching (uses DB 2)."""
+    global _redis_cache
+    if _redis_cache is None:
+        import redis as redis_lib
+        _redis_cache = redis_lib.Redis.from_url(
+            settings.redis_url.replace("/0", "/2"), decode_responses=True
+        )
+    return _redis_cache
+
+
+def _cache_get(key: str):
+    try:
+        data = _get_redis_cache().get(key)
+        return json.loads(data) if data else None
+    except Exception:
+        return None
+
+
+def _cache_set(key: str, value, ttl: int = 60):
+    try:
+        _get_redis_cache().setex(key, ttl, json.dumps(value))
+    except Exception:
+        pass
 
 
 # WebSocket connection manager
@@ -67,7 +103,9 @@ manager = ConnectionManager()
 # ── Simple Image Analysis Endpoint (PNG/JPG) ─────────────────────
 
 @router.post("/analyze", response_model=ImageAnalyzeResponse)
+@limiter.limit("10/minute")
 async def analyze_image(
+    request: Request,
     file: UploadFile = File(...),
 ) -> ImageAnalyzeResponse:
     """Upload a brain MRI image and start AI analysis."""
@@ -246,30 +284,51 @@ async def get_analysis_results(job_id: str) -> AnalysisResultResponse:
     )
 
 
-# ── Graph Analytics Endpoints ─────────────────────────────────────
+# ── Graph Analytics Endpoints (with Redis caching) ────────────────
 
 @router.get("/analytics/history/{patient_mrn}")
 async def get_patient_history(patient_mrn: str):
+    cache_key = f"analytics:history:{patient_mrn}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
     gdb = get_falkordb()
-    return gdb.get_analysis_history(patient_mrn)
+    result = gdb.get_analysis_history(patient_mrn)
+    _cache_set(cache_key, result, ttl=30)
+    return result
 
 
 @router.get("/analytics/grades")
 async def get_grade_stats():
+    cached = _cache_get("analytics:grades")
+    if cached is not None:
+        return cached
     gdb = get_falkordb()
-    return gdb.get_grade_statistics()
+    result = gdb.get_grade_statistics()
+    _cache_set("analytics:grades", result, ttl=60)
+    return result
 
 
 @router.get("/analytics/dataset")
 async def get_dataset_overview():
+    cached = _cache_get("analytics:dataset")
+    if cached is not None:
+        return cached
     gdb = get_falkordb()
-    return gdb.get_dataset_overview()
+    result = gdb.get_dataset_overview()
+    _cache_set("analytics:dataset", result, ttl=120)
+    return result
 
 
 @router.get("/analytics/training")
 async def get_training_history():
+    cached = _cache_get("analytics:training")
+    if cached is not None:
+        return cached
     gdb = get_falkordb()
-    return gdb.get_training_history()
+    result = gdb.get_training_history()
+    _cache_set("analytics:training", result, ttl=60)
+    return result
 
 
 # ── Helpers ───────────────────────────────────────────────────────
@@ -432,6 +491,69 @@ async def health_check() -> dict:
     }
 
 
+# ── Authentication Endpoints ─────────────────────────────────────
+
+@router.post("/auth/register")
+async def register_user(username: str, email: str, password: str, role: str = "doctor") -> dict:
+    """Register a new user. Stores credentials in FalkorDB."""
+    from app.auth import hash_password
+    gdb = get_falkordb()
+
+    # Check if user already exists
+    existing = gdb.graph.query(
+        "MATCH (u:User {username: $username}) RETURN u.username",
+        {"username": username},
+    )
+    if existing.result_set:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already exists")
+
+    hashed = hash_password(password)
+    now = datetime.utcnow().isoformat()
+    gdb.graph.query(
+        "CREATE (u:User {username: $username, email: $email, "
+        "  password_hash: $hash, role: $role, created_at: $now})",
+        {"username": username, "email": email, "hash": hashed, "role": role, "now": now},
+    )
+    gdb.create_audit_log("REGISTER", "User", username, username)
+    return {"username": username, "email": email, "role": role, "status": "registered"}
+
+
+@router.post("/auth/login")
+async def login(username: str, password: str) -> dict:
+    """Authenticate and receive JWT access + refresh tokens."""
+    from app.auth import verify_password, create_access_token, create_refresh_token
+    gdb = get_falkordb()
+
+    result = gdb.graph.query(
+        "MATCH (u:User {username: $username}) RETURN u.password_hash, u.role",
+        {"username": username},
+    )
+    if not result.result_set:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+
+    stored_hash, role = result.result_set[0]
+    if not verify_password(password, stored_hash):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+
+    token_data = {"sub": username, "role": role}
+    access_token = create_access_token(token_data)
+    refresh_token = create_refresh_token(token_data)
+
+    gdb.create_audit_log("LOGIN", "User", username, username)
+    return {"access_token": access_token, "refresh_token": refresh_token, "token_type": "bearer"}
+
+
+@router.post("/auth/refresh")
+async def refresh_token(refresh_token: str) -> dict:
+    """Exchange a refresh token for new access + refresh tokens."""
+    from app.auth import verify_token, create_access_token, create_refresh_token
+
+    token_data = verify_token(refresh_token, expected_type="refresh")
+    new_access = create_access_token({"sub": token_data.sub, "role": token_data.role})
+    new_refresh = create_refresh_token({"sub": token_data.sub, "role": token_data.role})
+    return {"access_token": new_access, "refresh_token": new_refresh, "token_type": "bearer"}
+
+
 @router.get("/graph/stats")
 async def get_graph_statistics() -> dict:
     """Get aggregate analysis statistics from FalkorDB."""
@@ -470,17 +592,114 @@ async def find_similar_cases(tumor_grade: str) -> dict:
 
 @router.post("/training/start")
 async def start_training() -> dict:
-    """Trigger ensemble training."""
+    """Trigger ensemble training via the CLI trainer (synchronous in worker)."""
     try:
-        from app.workers.celery_worker import train_model_task
-        task = train_model_task.apply_async()
+        from app.workers.celery_worker import celery_app
+        task = celery_app.send_task("app.workers.celery_worker.run_tumor_inference")
         return {
-            "task_id": task.id,
-            "status": "training_started",
-            "message": "Ensemble training queued. Check task status for progress.",
+            "status": "training_not_available",
+            "message": "Use 'docker compose exec backend python -m app.train' to train models.",
         }
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to start training: {str(e)}")
+
+
+# ── Doctor Endpoints (M:N relationships) ──────────────────────────
+
+@router.post("/doctors")
+async def create_doctor(
+    doctor_id: str, name: str, specialization: str,
+    license_number: str, email: str,
+) -> dict:
+    """Create a new doctor in the graph database."""
+    gdb = get_falkordb()
+    result = gdb.create_doctor(doctor_id, name, specialization, license_number, email)
+    gdb.create_audit_log("CREATE", "Doctor", doctor_id, "system", f"Created doctor {name}")
+    return result
+
+
+@router.get("/doctors/{doctor_id}")
+async def get_doctor(doctor_id: str) -> dict:
+    gdb = get_falkordb()
+    doctor = gdb.get_doctor(doctor_id)
+    if not doctor:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Doctor not found")
+    return doctor
+
+
+@router.post("/doctors/{doctor_id}/assign-patient/{patient_mrn}")
+async def assign_doctor_to_patient(doctor_id: str, patient_mrn: str, notes: str = "") -> dict:
+    """M:N — Assign a doctor to review a patient."""
+    gdb = get_falkordb()
+    gdb.assign_doctor_to_patient(doctor_id, patient_mrn, notes)
+    gdb.create_audit_log("ASSIGN", "Doctor-Patient", f"{doctor_id}:{patient_mrn}", "system")
+    return {"status": "assigned", "doctor_id": doctor_id, "patient_mrn": patient_mrn}
+
+
+@router.post("/doctors/{doctor_id}/assign-job/{job_id}")
+async def assign_doctor_to_job(doctor_id: str, job_id: str, priority: str = "normal") -> dict:
+    """M:N — Assign a doctor as reviewer for an inference job."""
+    gdb = get_falkordb()
+    gdb.assign_doctor_to_job(doctor_id, job_id, priority)
+    gdb.create_audit_log("ASSIGN", "Doctor-Job", f"{doctor_id}:{job_id}", "system")
+    return {"status": "assigned", "doctor_id": doctor_id, "job_id": job_id}
+
+
+@router.get("/doctors/{doctor_id}/patients")
+async def get_doctor_patients(doctor_id: str) -> dict:
+    """Get all patients reviewed by a doctor (M:N)."""
+    gdb = get_falkordb()
+    return {"doctor_id": doctor_id, "patients": gdb.get_doctor_patients(doctor_id)}
+
+
+@router.get("/patients/{patient_mrn}/doctors")
+async def get_patient_doctors(patient_mrn: str) -> dict:
+    """Get all doctors who have reviewed a patient (M:N)."""
+    gdb = get_falkordb()
+    return {"patient_mrn": patient_mrn, "doctors": gdb.get_patient_doctors(patient_mrn)}
+
+
+# ── Tag Endpoints (M:N with Scans) ───────────────────────────────
+
+@router.post("/scans/{scan_id}/tags/{tag_name}")
+async def tag_scan(scan_id: str, tag_name: str) -> dict:
+    """M:N — Tag a scan with a label (e.g., urgent, second-opinion)."""
+    gdb = get_falkordb()
+    gdb.tag_scan(scan_id, tag_name)
+    return {"scan_id": scan_id, "tag": tag_name, "status": "tagged"}
+
+
+@router.get("/tags/{tag_name}/scans")
+async def get_scans_by_tag(tag_name: str) -> dict:
+    """Get all scans with a given tag (M:N)."""
+    gdb = get_falkordb()
+    return {"tag": tag_name, "scans": gdb.get_scans_by_tag(tag_name)}
+
+
+# ── Audit Log Endpoints ──────────────────────────────────────────
+
+@router.get("/audit-logs")
+async def get_audit_logs(entity_type: str | None = None, limit: int = 50) -> dict:
+    """Get audit trail. Optionally filter by entity_type."""
+    gdb = get_falkordb()
+    return {"logs": gdb.get_audit_logs(entity_type, limit)}
+
+
+# ── Model Versioning Endpoints ────────────────────────────────────
+
+@router.get("/models/{model_name}/versions")
+async def get_model_versions(model_name: str) -> dict:
+    gdb = get_falkordb()
+    return {"model_name": model_name, "versions": gdb.get_model_versions(model_name)}
+
+
+@router.get("/models/{model_name}/active")
+async def get_active_model(model_name: str) -> dict:
+    gdb = get_falkordb()
+    active = gdb.get_active_model_version(model_name)
+    if not active:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No active version found")
+    return active
 
 
 @router.get("/ensemble/status")
@@ -506,3 +725,197 @@ async def get_ensemble_status() -> dict:
         "ensemble_ready": trained_count >= 2,
         "full_ensemble": trained_count == len(status_info),
     }
+
+
+# ── Grad-CAM Explainable AI Endpoint ─────────────────────────────
+
+@router.post("/explainability/gradcam/{job_id}")
+@limiter.limit("5/minute")
+async def generate_gradcam_heatmap(request: Request, job_id: str, model_name: str = "resnet50") -> dict:
+    """
+    Generate a Grad-CAM heatmap for a completed inference job.
+
+    Returns base64-encoded heatmap overlay showing which regions
+    of the MRI the selected model focused on for its prediction.
+    """
+    import base64
+    import io
+
+    gdb = get_falkordb()
+    storage = get_storage_backend()
+
+    job = gdb.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    if job["status"] != "completed":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Job not completed yet")
+
+    scan = gdb.get_scan(job["scan_id"])
+    if not scan or not scan.get("storage_location"):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scan image not found")
+
+    try:
+        image_bytes = storage.download_file(scan["storage_location"])
+        from PIL import Image as PILImage
+        original_image = PILImage.open(io.BytesIO(image_bytes)).convert("RGB")
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to load image: {e}")
+
+    try:
+        from app.dataset.ensemble import EnsembleEngine, get_inference_transforms
+        from app.dataset.gradcam import get_gradcam_for_model
+
+        engine = EnsembleEngine(device="cpu", image_size=224)
+
+        if model_name not in engine.models:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Model '{model_name}' not loaded. Available: {engine.model_names}",
+            )
+
+        model, _ = engine.models[model_name]
+        gradcam = get_gradcam_for_model(model, model_name)
+        if gradcam is None:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Could not init Grad-CAM")
+
+        transform = get_inference_transforms(224)
+        input_tensor = transform(original_image).unsqueeze(0)
+
+        heatmap_image = gradcam.generate_heatmap_overlay(input_tensor, original_image, alpha=0.5)
+        gradcam.cleanup()
+
+        # Encode as base64 PNG
+        buffer = io.BytesIO()
+        heatmap_image.save(buffer, format="PNG")
+        heatmap_b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+        return {
+            "job_id": job_id,
+            "model_name": model_name,
+            "heatmap_base64": heatmap_b64,
+            "explanation": (
+                f"Grad-CAM heatmap for {model_name}: Red/warm regions indicate areas the model "
+                "focused on most when making its classification decision. Blue/cool regions had "
+                "less influence on the prediction."
+            ),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Grad-CAM generation failed: {e}")
+
+
+# ── ONNX Runtime Endpoints ───────────────────────────────────────
+
+@router.post("/onnx/export/{model_name}")
+@limiter.limit("2/minute")
+async def export_model_to_onnx_endpoint(request: Request, model_name: str) -> dict:
+    """Export a PyTorch model to ONNX format for optimized inference."""
+    valid_models = ["2d", "resnet50", "efficientnet", "densenet"]
+    if model_name not in valid_models:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid model. Choose from: {valid_models}",
+        )
+
+    try:
+        import torch
+        from app.dataset.onnx_engine import export_model_to_onnx, quantize_onnx_model
+        from app.dataset.models import MODEL_REGISTRY
+        from app.dataset.trainer import BrainTumorClassifier, NUM_CLASSES
+        from app.dataset.models import ResNet50Classifier, EfficientNetClassifier, DenseNetClassifier
+        from pathlib import Path
+
+        # Map short name to model class and registry key
+        model_class_map = {
+            "2d": (BrainTumorClassifier, "custom_cnn"),
+            "resnet50": (ResNet50Classifier, "resnet50"),
+            "efficientnet": (EfficientNetClassifier, "efficientnet"),
+            "densenet": (DenseNetClassifier, "densenet"),
+        }
+        cls, registry_key = model_class_map[model_name]
+        weight_path = MODEL_REGISTRY[registry_key]["path"]
+        if not Path(weight_path).exists():
+            raise HTTPException(status_code=404, detail=f"Model weights not found at {weight_path}")
+
+        model = cls(NUM_CLASSES)
+        model.load_state_dict(torch.load(weight_path, map_location="cpu", weights_only=True))
+
+        model.eval()
+        onnx_path = export_model_to_onnx(model, f"brain_tumor_{model_name}")
+        if onnx_path is None:
+            raise HTTPException(status_code=500, detail="ONNX export failed")
+
+        # Try quantization
+        quantized_path = quantize_onnx_model(onnx_path)
+
+        return {
+            "model_name": model_name,
+            "onnx_path": onnx_path,
+            "quantized_path": quantized_path,
+            "status": "exported",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"ONNX export failed: {e}")
+
+
+@router.get("/onnx/models")
+async def list_onnx_models() -> dict:
+    """List all available ONNX models and their file sizes."""
+    from pathlib import Path
+
+    model_dir = Path("/models")
+    onnx_files = list(model_dir.glob("*.onnx"))
+
+    models = []
+    for f in onnx_files:
+        models.append({
+            "name": f.stem,
+            "path": str(f),
+            "size_mb": round(f.stat().st_size / (1024 * 1024), 2),
+            "quantized": "_quantized" in f.stem,
+        })
+
+    return {"onnx_models": models, "count": len(models)}
+
+
+@router.post("/onnx/predict")
+@limiter.limit("20/minute")
+async def onnx_predict(request: Request, file: UploadFile = File(...)) -> dict:
+    """
+    Run inference using ONNX Runtime ensemble (faster than PyTorch).
+    """
+    import numpy as np
+    from PIL import Image
+    import io
+    from torchvision import transforms
+    from app.dataset.onnx_engine import ONNXInferenceEngine
+
+    try:
+        contents = await file.read()
+        image = Image.open(io.BytesIO(contents)).convert("RGB")
+
+        transform = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ])
+        tensor = transform(image).unsqueeze(0)
+        input_array = tensor.numpy().astype(np.float32)
+
+        engine = ONNXInferenceEngine(model_dir="/models")
+        if not engine.available_models:
+            raise HTTPException(
+                status_code=404,
+                detail="No ONNX models available. Export models first via POST /onnx/export/{model_name}",
+            )
+
+        result = engine.predict_ensemble(input_array)
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"ONNX inference failed: {e}")

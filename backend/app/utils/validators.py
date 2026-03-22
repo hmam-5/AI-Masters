@@ -7,7 +7,7 @@ Handles corrupted file detection, format validation, and metadata extraction.
 import io
 import tempfile
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 
 import nibabel as nib
 import numpy as np
@@ -132,33 +132,6 @@ class NIfTIValidator:
         except Exception as e:
             raise ImageValidationError(f"NIfTI validation failed: {str(e)}")
 
-    @staticmethod
-    def standardize_4d_to_3d(file_content: bytes) -> bytes:
-        """
-        Convert 4D NIfTI (e.g., time series) to 3D by taking first volume.
-
-        Args:
-            file_content: 4D NIfTI file bytes
-
-        Returns:
-            bytes: 3D NIfTI file bytes
-        """
-        try:
-            img = nib.load(nib.FileHolder.from_bytes(file_content))
-            data = img.get_fdata()
-
-            if data.ndim == 4:
-                # Take first volume
-                data_3d = data[..., 0]
-                img_3d = nib.Nifti1Image(data_3d, affine=img.affine, header=img.header)
-                output = nib.FileHolder()
-                nib.save(img_3d, output)
-                return output.getbuffer().tobytes()
-            else:
-                return file_content
-        except Exception as e:
-            raise ImageValidationError(f"4D conversion failed: {str(e)}")
-
 
 class RegularImageValidator:
     """Validation for regular image files (PNG, JPG, JPEG)."""
@@ -207,41 +180,3 @@ class RegularImageValidator:
             raise
         except Exception as e:
             raise ImageValidationError(f"Image validation failed: {str(e)}")
-
-
-class MultimodalValidator:
-    """Validation for multi-modal image sets."""
-
-    @staticmethod
-    def validate_modality_set(
-        modalities: dict[str, bytes],
-    ) -> Tuple[bool, str, dict]:
-        """
-        Validate that all modalities have consistent shapes.
-
-        Args:
-            modalities: Dictionary of {modality: file_bytes} e.g., {'T1': bytes, 'T2': bytes}
-
-        Returns:
-            Tuple of (valid: bool, error_msg: str, shapes: dict)
-        """
-        shapes = {}
-
-        for modality, file_content in modalities.items():
-            try:
-                validator = NIfTIValidator if modality.endswith(".nii") else DICOMValidator
-                metadata = validator.validate(file_content)
-                shapes[modality] = metadata["shape"]
-            except ImageValidationError as e:
-                return False, f"{modality} validation failed: {str(e)}", {}
-
-        # Check shape consistency
-        unique_shapes = set(str(s) for s in shapes.values())
-        if len(unique_shapes) > 1:
-            return (
-                False,
-                f"Inconsistent shapes across modalities: {shapes}",
-                {},
-            )
-
-        return True, "", shapes

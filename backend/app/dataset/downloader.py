@@ -52,15 +52,6 @@ DATASET_REGISTRY = {
     },
 }
 
-# Grade mapping for the 4-class classification
-CLASS_TO_GRADE = {
-    "glioma": "Grade IV",
-    "meningioma": "Grade II",
-    "pituitary": "Grade III",
-    "no_tumor": "No Tumor",
-}
-
-
 class DatasetDownloader:
     """Downloads and organizes brain tumor datasets for training."""
 

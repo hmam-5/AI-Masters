@@ -21,7 +21,6 @@ const PipelineLog: React.FC<Props> = ({ logs, isOpen, onToggle }) => {
       <div className="crw-bottom-header" onClick={onToggle}>
         <div className="crw-bottom-tabs">
           <button className="crw-bottom-tab active">Pipeline Logs</button>
-          <button className="crw-bottom-tab">Events</button>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           <span style={{ fontSize: '0.65rem', color: 'var(--text-tertiary)' }}>

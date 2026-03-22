@@ -24,3 +24,19 @@ kaggle==1.6.14
 pytest==7.4.3
 pytest-asyncio==0.21.1
 types-requests==2.31.0.10
+
+# Rate Limiting
+slowapi==0.1.9
+
+# Observability: Prometheus metrics + distributed tracing
+prometheus-fastapi-instrumentator==6.1.0
+opentelemetry-api==1.22.0
+opentelemetry-sdk==1.22.0
+opentelemetry-exporter-jaeger==1.21.0
+opentelemetry-instrumentation-fastapi==0.43b0
+opentelemetry-instrumentation-redis==0.43b0
+opentelemetry-instrumentation-celery==0.43b0
+
+# ONNX Runtime for optimized inference
+onnx==1.15.0
+onnxruntime==1.16.3

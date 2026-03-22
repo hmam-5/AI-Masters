@@ -91,7 +91,7 @@ Watch for this line in the terminal output:
 brain-tumor-backend  | INFO:     Application startup complete.
 ```
 
-Once you see it, all 7 services are ready.
+Once you see it, all 10 services are ready.
 
 ### Step 5 — Open the application
 
@@ -100,6 +100,9 @@ Once you see it, all 7 services are ready.
 | **http://localhost** | Web application (main UI) |
 | **http://localhost:8000/docs** | Interactive API documentation (Swagger) |
 | **http://localhost:9001** | MinIO console (file storage admin) |
+| **http://localhost:16686** | Jaeger UI (distributed tracing) |
+| **http://localhost:9090** | Prometheus (metrics explorer) |
+| **http://localhost:3001** | Grafana dashboards (admin/admin) |
 
 ### Step 6 — Upload a brain MRI scan
 
@@ -186,17 +189,20 @@ docker compose down -v
 
 ## Architecture
 
-### Services (7 containers)
+### Services (10 containers)
 
 | Service | Image | Port | Role |
 |---------|-------|------|------|
 | **Nginx** | `nginx:alpine` | `80` | Reverse proxy — routes `/api/*` to backend, everything else to frontend |
-| **Frontend** | Node 18 → Nginx (multi-stage) | `3000` | React + TypeScript web interface |
+| **Frontend** | Node 20 + Vite → Nginx (multi-stage) | `3000` | React + TypeScript + Vite web interface |
 | **Backend** | Python 3.11 | `8000` | FastAPI REST API + WebSocket server |
 | **Celery Worker** | Python 3.11 | — | Async inference worker (GPU-optional) |
-| **Redis** | `redis:7-alpine` | `6379` | Message broker + result backend for Celery |
-| **FalkorDB** | `falkordb/falkordb` | `6381` | Graph database — stores patients, scans, results, analytics |
+| **Redis** | `redis:7-alpine` | `6379` | Message broker + result backend + response cache |
+| **FalkorDB** | `falkordb/falkordb` | `6381` | Graph database — patients, scans, results, doctors, tags, audit logs |
 | **MinIO** | `minio/minio` | `9000` / `9001` | S3-compatible object storage for MRI files |
+| **Jaeger** | `jaegertracing/all-in-one` | `16686` | Distributed tracing — visualize request flow across services |
+| **Prometheus** | `prom/prometheus` | `9090` | Metrics collection — scrapes `/metrics` from backend |
+| **Grafana** | `grafana/grafana` | `3001` | Monitoring dashboards — request rate, latency, errors |
 
 ### Tech Stack
 
@@ -204,11 +210,18 @@ docker compose down -v
 |-------|-----------|---------|
 | **Backend** | FastAPI + Pydantic | 0.104 / 2.5 |
 | **ML Framework** | PyTorch + TorchVision | 2.1 |
+| **ML Optimization** | ONNX Runtime (INT8 quantization) | 1.16 |
 | **Task Queue** | Celery + Redis | 5.3 |
 | **Graph Database** | FalkorDB | 1.0 |
 | **Object Storage** | MinIO (S3-compatible) | Latest |
-| **Frontend** | React + TypeScript | 18 |
+| **Frontend** | React + TypeScript + Vite | 18 / 5.4 |
 | **HTTP Client** | Axios | 1.6 |
+| **Auth** | OAuth2 + JWT (bcrypt) | — |
+| **Rate Limiting** | slowapi | 0.1.9 |
+| **Tracing** | OpenTelemetry + Jaeger | 1.22 |
+| **Metrics** | Prometheus + Grafana | — |
+| **XAI** | Grad-CAM heatmaps | — |
+| **CI/CD** | GitHub Actions | — |
 | **Reverse Proxy** | Nginx | Alpine |
 | **Containerization** | Docker Compose | v2 |
 
@@ -219,41 +232,51 @@ docker compose down -v
 ```
 brain-tumor-ai-framework/
 │
-├── docker-compose.yml                 # Orchestrates all 7 services
+├── docker-compose.yml                 # Orchestrates all 10 services
 ├── Dockerfile.backend                 # Python 3.11 backend image
-├── Dockerfile.frontend                # Multi-stage Node → Nginx image
+├── Dockerfile.frontend                # Multi-stage Vite → Nginx image
 ├── Dockerfile.worker                  # Celery worker image
 │
+├── .github/
+│   └── workflows/
+│       └── ci.yml                     # GitHub Actions CI/CD pipeline
+│
 ├── backend/
-│   ├── requirements.txt               # Python dependencies (26 packages)
+│   ├── requirements.txt               # Python dependencies (35+ packages)
 │   └── app/
-│       ├── main.py                    # FastAPI entry point + lifespan events
+│       ├── main.py                    # FastAPI entry + rate limiting + Prometheus + Jaeger
 │       ├── train.py                   # CLI training script for all 4 models
+│       ├── auth.py                    # OAuth2 + JWT authentication module
 │       ├── api/
-│       │   └── routes.py              # 13 REST + WebSocket endpoints
+│       │   └── routes.py              # 30+ REST + WebSocket endpoints
 │       ├── config/
 │       │   └── settings.py            # Pydantic settings (env-based config)
 │       ├── dataset/
 │       │   ├── models.py              # MODEL_REGISTRY — 4 neural network architectures
 │       │   ├── ensemble.py            # Ensemble inference + TTA logic
 │       │   ├── trainer.py             # Training loop (per-model)
-│       │   └── downloader.py          # Kaggle dataset download + folder organization
+│       │   ├── downloader.py          # Kaggle dataset download + folder organization
+│       │   ├── gradcam.py             # Grad-CAM XAI heatmap generation
+│       │   └── onnx_engine.py         # ONNX export, quantization, runtime inference
 │       ├── models/
-│       │   └── database.py            # JobStatus enum + TumorSubregion definitions
+│       │   └── database.py            # JobStatus enum
 │       ├── services/
-│       │   ├── graph_db.py            # FalkorDB client — Cypher queries + schema
+│       │   ├── graph_db.py            # FalkorDB client — 15 entities, M:N relationships
 │       │   └── storage.py             # MinIO/S3 storage abstraction
 │       ├── workers/
 │       │   └── celery_worker.py       # analyze_image task — runs ensemble inference
+│       ├── schemas/
+│       │   └── __init__.py            # 23 Pydantic models (validation + serialization)
 │       └── utils/
 │           └── validators.py          # File validators (DICOM, NIfTI, standard images)
 │
 ├── frontend/
-│   ├── package.json                   # React + TypeScript + Axios
+│   ├── package.json                   # React + TypeScript + Vite
+│   ├── vite.config.ts                 # Vite build configuration
 │   ├── tsconfig.json                  # TypeScript configuration
+│   ├── tsconfig.node.json             # Vite node TypeScript config
+│   ├── index.html                     # Vite HTML entry point
 │   ├── nginx.conf                     # Standalone frontend Nginx config
-│   ├── public/
-│   │   └── index.html                 # HTML entry point
 │   └── src/
 │       ├── index.tsx                  # React DOM render
 │       ├── App.tsx                    # Root component
@@ -266,7 +289,7 @@ brain-tumor-ai-framework/
 │       │   ├── PipelineLog.tsx        # Real-time processing log
 │       │   └── AIChatAssistant.tsx    # AI assistant chat panel
 │       ├── services/
-│       │   └── api.ts                 # Axios API client (4 methods)
+│       │   └── api.ts                 # Axios API client
 │       ├── types/
 │       │   └── api.ts                 # TypeScript interfaces
 │       └── styles/
@@ -278,14 +301,129 @@ brain-tumor-ai-framework/
 │   ├── brain_tumor_efficientnet.pth   # EfficientNet-B0 weights
 │   └── brain_tumor_densenet.pth       # DenseNet-121 weights
 │
-├── data/                              # Training datasets (optional, for retraining)
-│   ├── combined/                      # Organized train/val splits
-│   ├── datasets/                      # Kaggle-sourced data
-│   └── raw/                           # Raw downloaded datasets
+├── infra/
+│   ├── nginx.conf                     # Production reverse proxy config
+│   ├── prometheus.yml                 # Prometheus scrape configuration
+│   └── grafana/
+│       ├── provisioning/
+│       │   ├── datasources/
+│       │   │   └── prometheus.yml     # Grafana → Prometheus datasource
+│       │   └── dashboards/
+│       │       └── dashboards.yml     # Dashboard provider config
+│       └── dashboards/
+│           └── brain-tumor.json       # Pre-built monitoring dashboard
 │
-└── infra/
-    └── nginx.conf                     # Production reverse proxy config
+├── screenshots/                       # UI screenshots & architecture diagrams
+│
+└── data/                              # Training datasets (optional, for retraining)
+    ├── combined/                      # Organized train/val splits
+    ├── datasets/                      # Kaggle-sourced data
+    └── raw/                           # Raw downloaded datasets
 ```
+
+---
+
+## Screenshots
+
+See the [`screenshots/`](screenshots/) directory for UI screenshots and architecture diagrams referenced below.
+
+---
+
+## Advanced Features
+
+### 1. Explainable AI — Grad-CAM Heatmaps
+
+The system generates visual heatmaps showing **which regions of the MRI** each model focused on when making its prediction. Red = high attention, blue = low attention. Built on class activation mapping from the final convolutional layer.
+
+```bash
+curl -X POST http://localhost:8000/api/v1/explainability/gradcam/{job_id}?model_name=resnet50
+```
+
+### 2. ONNX Runtime Optimization
+
+Export PyTorch models to ONNX format for **3-5x faster inference** with optional INT8 quantization. This is the same approach used by Azure ML and edge deployments.
+
+```bash
+# Export a model
+curl -X POST http://localhost:8000/api/v1/onnx/export/resnet50
+
+# Run inference on the optimized model
+curl -X POST http://localhost:8000/api/v1/onnx/predict -F "file=@brain_scan.png"
+```
+
+### 3. Distributed Tracing (Jaeger)
+
+Every API request is traced end-to-end through FastAPI → Redis → FalkorDB → MinIO. Open **http://localhost:16686** to visualize request timelines, bottlenecks, and service dependencies.
+
+### 4. Metrics & Monitoring (Prometheus + Grafana)
+
+The backend exposes a `/metrics` endpoint scraped by Prometheus every 15 seconds. A pre-built Grafana dashboard at **http://localhost:3001** shows:
+
+- Request rate (req/sec)
+- P95 latency
+- 5xx error rate
+- Active requests gauge
+- Inference latency
+
+### 5. OAuth2 + JWT Authentication
+
+Full authentication flow with bcrypt password hashing, access tokens (30 min), and refresh tokens (7 days). Role-based access control (admin/doctor/researcher).
+
+```bash
+# Register
+curl -X POST "http://localhost:8000/api/v1/auth/register?username=dr_smith&email=dr@hospital.com&password=secret&role=doctor"
+
+# Login → returns JWT
+curl -X POST "http://localhost:8000/api/v1/auth/login?username=dr_smith&password=secret"
+```
+
+### 6. Rate Limiting
+
+Redis-backed rate limiting via `slowapi`:
+- Default: 200 requests/minute per IP
+- `/analyze`: 10 requests/minute (heavy GPU workload)
+- `/onnx/export`: 2 requests/minute
+- `/onnx/predict`: 20 requests/minute
+
+### 7. Redis Response Caching
+
+Analytics endpoints are cached with TTLs (30-120 seconds) to reduce FalkorDB load. Cache is invalidated automatically on data changes.
+
+### 8. Many-to-Many Relationships (FalkorDB)
+
+Graph database M:N relationships:
+- **Doctor ↔ Patient** (`:REVIEWED`) — a doctor can review multiple patients, a patient can have multiple doctors
+- **Doctor ↔ InferenceJob** (`:ASSIGNED_TO`) — doctors assigned to specific analysis jobs
+- **Scan ↔ Tag** (`:TAGGED_WITH`) — scans tagged with multiple labels
+
+### 9. CI/CD Pipeline (GitHub Actions)
+
+Automated CI on every push/PR:
+- Python linting (Ruff) + type checking (mypy)
+- TypeScript type checking + Vite build
+- Docker image builds for all 3 services (with GitHub Actions cache)
+
+---
+
+## FalkorDB Graph Schema (15 Entities)
+
+| Entity | Properties | Key Relationships |
+|--------|-----------|------------------|
+| **Patient** | mrn, name, age, sex | HAS_SCAN, REVIEWED (M:N Doctor) |
+| **Scan** | scan_id, modality, uploaded_at | ANALYZED_BY, TAGGED_WITH (M:N Tag) |
+| **InferenceJob** | job_id, status, created_at | PRODUCED, ASSIGNED_TO (M:N Doctor) |
+| **AnalysisResult** | result_id, confidence | CLASSIFIED_AS |
+| **TumorType** | type_name | GRADED_AS |
+| **TumorGrade** | grade, description | — |
+| **SubregionResult** | region_name, probability | — |
+| **ClassificationResult** | model_name, predicted_class | — |
+| **DatasetImage** | path, split, class_label | — |
+| **TrainingRun** | run_id, accuracy, loss | — |
+| **Doctor** | doctor_id, name, specialty | REVIEWED (M:N Patient), ASSIGNED_TO (M:N Job) |
+| **AuditLog** | log_id, action, timestamp | — |
+| **ModelVersion** | version_id, architecture, active | SUPERSEDES (chain) |
+| **Tag** | name | TAGGED_WITH (M:N Scan) |
+| **User** | username, email, role, hashed_pw | — |
 
 ---
 
@@ -327,6 +465,49 @@ Interactive docs: **http://localhost:8000/docs** (Swagger UI)
 |--------|----------|-------------|
 | `POST` | `/training/start` | Start training pipeline for all 4 models. |
 | `GET` | `/ensemble/status` | Check loaded models and ensemble readiness. |
+
+### Authentication
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/auth/register` | Register a new user (doctor/admin/researcher). |
+| `POST` | `/auth/login` | Login with credentials → returns JWT access + refresh tokens. |
+| `POST` | `/auth/refresh` | Refresh an expired access token. |
+
+### Doctor & M:N Relationships
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/doctors` | Create a new doctor record. |
+| `GET` | `/doctors/{doctor_id}` | Get doctor details. |
+| `POST` | `/doctors/{doctor_id}/assign-patient/{mrn}` | Assign doctor to patient (M:N). |
+| `POST` | `/doctors/{doctor_id}/assign-job/{job_id}` | Assign doctor to job (M:N). |
+| `GET` | `/doctors/{doctor_id}/patients` | Get all patients for a doctor. |
+| `GET` | `/patients/{mrn}/doctors` | Get all doctors for a patient. |
+
+### Tags (M:N)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/scans/{scan_id}/tags/{tag_name}` | Tag a scan (M:N Scan↔Tag). |
+| `GET` | `/tags/{tag_name}/scans` | Get all scans with a given tag. |
+
+### Explainability & ONNX
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/explainability/gradcam/{job_id}` | Generate Grad-CAM heatmap for a completed job. |
+| `POST` | `/onnx/export/{model_name}` | Export PyTorch model to ONNX with quantization. |
+| `GET` | `/onnx/models` | List available ONNX models. |
+| `POST` | `/onnx/predict` | Run ensemble inference via ONNX Runtime. |
+
+### Audit & Versioning
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/audit-logs` | Retrieve system audit logs. |
+| `POST` | `/models/versions` | Register a new model version. |
+| `GET` | `/models/versions` | List all model versions (with SUPERSEDES chain). |
 
 ### Example: Analyze an image
 
@@ -415,6 +596,12 @@ All settings have sensible defaults. Override via a `.env` file in the project r
 | `FALKORDB_PORT` | `6379` | FalkorDB port |
 | `STORAGE_BACKEND` | `minio` | Storage backend (`minio` or `s3`) |
 | `ENSEMBLE_MODELS` | `custom_cnn,resnet50,efficientnet,densenet` | Active ensemble models |
+| `JAEGER_HOST` | `jaeger` | Jaeger agent hostname |
+| `JAEGER_PORT` | `6831` | Jaeger agent UDP port |
+| `TRACING_ENABLED` | `true` | Enable/disable OpenTelemetry tracing |
+| `RATE_LIMIT_DEFAULT` | `200/minute` | Default rate limit per IP |
+| `RATE_LIMIT_ANALYZE` | `10/minute` | Rate limit for /analyze endpoint |
+| `JWT_SECRET_KEY` | (auto-generated) | Secret key for JWT token signing |
 | `DEBUG` | `false` | Enable debug mode |
 | `ENVIRONMENT` | `development` | Runtime environment |
 | `CUDA_VISIBLE_DEVICES` | `0` | GPU device for Celery worker |

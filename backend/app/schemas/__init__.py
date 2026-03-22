@@ -198,3 +198,78 @@ class ErrorResponse(BaseModel):
     message: str
     detail: Optional[str] = None
     timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+
+# Doctor Schemas (M:N with Patient)
+class DoctorBase(BaseModel):
+    """Base doctor schema."""
+
+    name: str = Field(..., description="Doctor's full name")
+    specialization: str = Field(..., description="Medical specialization (e.g., Neuro-oncology)")
+    license_number: str = Field(..., description="Medical license number")
+    email: str = Field(..., description="Contact email")
+
+
+class DoctorCreate(DoctorBase):
+    """Doctor creation schema."""
+    pass
+
+
+class DoctorResponse(DoctorBase):
+    """Doctor response schema."""
+
+    id: str
+    created_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class DoctorAssignmentResponse(BaseModel):
+    """Response for doctor-patient or doctor-job assignment."""
+
+    status: str
+    doctor_id: str
+    patient_mrn: Optional[str] = None
+    job_id: Optional[str] = None
+
+
+# Tag Schema (M:N with Scan)
+class TagResponse(BaseModel):
+    """Tag response schema."""
+
+    name: str = Field(..., description="Tag name (e.g., urgent, second-opinion)")
+
+
+class ScanTagResponse(BaseModel):
+    """Scan tag assignment response."""
+
+    scan_id: str
+    tag: str
+    status: str
+
+
+# Audit Log Schema
+class AuditLogResponse(BaseModel):
+    """Audit log entry response schema."""
+
+    id: str
+    action: str = Field(..., description="Action performed (CREATE, UPDATE, DELETE, ASSIGN)")
+    entity_type: str = Field(..., description="Type of entity affected")
+    entity_id: str
+    actor: str = Field(..., description="Who performed the action")
+    timestamp: datetime
+    details: Optional[str] = None
+
+
+# Model Version Schema
+class ModelVersionResponse(BaseModel):
+    """Model version response schema."""
+
+    id: str
+    model_name: str
+    version: str
+    accuracy: float = Field(..., ge=0.0, le=1.0)
+    path: str
+    status: str = Field(..., description="active or superseded")
+    created_at: Optional[datetime] = None

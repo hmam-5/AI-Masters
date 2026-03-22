@@ -59,8 +59,6 @@ class Settings(BaseSettings):
     chunk_size_bytes: int = 1024 * 1024  # 1MB chunks
 
     # ML Model Configuration
-    model_unet_path: str = "/models/unet_3d_segmentation.pth"
-    model_resnet_path: str = "/models/resnet3d_classification.pth"
     model_2d_path: str = "/models/brain_tumor_2d.pth"
     model_resnet50_path: str = "/models/brain_tumor_resnet50.pth"
     model_efficientnet_path: str = "/models/brain_tumor_efficientnet.pth"
@@ -71,15 +69,20 @@ class Settings(BaseSettings):
     num_inference_workers: int = 4
     min_confidence_for_auto_decision: float = 0.99
 
-    # Preprocessing
-    target_spacing: tuple[float, float, float] = (1.0, 1.0, 1.0)
-    normalization_scheme: str = "zscore"  # 'zscore' or 'minmax'
-
     # Security
     secret_key: str = "your-secret-key-change-in-production"
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 7
+
+    # Rate Limiting
+    rate_limit_default: str = "200/minute"
+    rate_limit_analyze: str = "10/minute"
+
+    # Observability: Jaeger distributed tracing
+    jaeger_host: str = "jaeger"
+    jaeger_port: int = 6831
+    tracing_enabled: bool = True
 
     # Logging
     log_level: str = "INFO"

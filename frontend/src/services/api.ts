@@ -5,7 +5,7 @@ import type {
   ImageAnalyzeResponse,
 } from "../types/api";
 
-const API_BASE_URL = process.env.REACT_APP_API_URL || "/api/v1";
+const API_BASE_URL = import.meta.env.VITE_API_URL || "/api/v1";
 
 class ApiService {
   private async request<T>(

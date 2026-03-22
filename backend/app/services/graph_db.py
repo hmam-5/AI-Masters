@@ -2,7 +2,7 @@
 FalkorDB graph database service — sole persistence layer.
 
 Stores patients, scans, inference jobs, classification/segmentation results,
-training metadata, and dataset knowledge in a graph structure.
+training metadata, doctors, audit logs, and review assignments in a graph structure.
 
 Graph Schema:
   (:Patient {mrn, sex, dob, created_at})
@@ -15,6 +15,16 @@ Graph Schema:
   (:ClassificationResult {job_id, tumor_grade, confidence_score, classification_details, created_at})
   (:DatasetImage {path, class_label, split, source_dataset})
   (:TrainingRun {id, accuracy, epochs, timestamp, model_path})
+  (:Doctor {id, name, specialization, license_number, email, created_at})
+  (:AuditLog {id, action, entity_type, entity_id, actor, timestamp, details})
+  (:ModelVersion {id, model_name, version, accuracy, path, created_at, status})
+  (:Tag {name})
+
+Many-to-Many relationships:
+  (Doctor)-[:REVIEWED {reviewed_at, notes, decision}]->(Patient)  — M:N
+  (Doctor)-[:ASSIGNED_TO {assigned_at, priority, status}]->(InferenceJob) — M:N
+  (Scan)-[:TAGGED_WITH]->(Tag) — M:N
+  (ModelVersion)-[:SUPERSEDES]->(ModelVersion) — version chain
 """
 
 import json
@@ -56,7 +66,7 @@ class FalkorDBService:
     # ── Schema ────────────────────────────────────────────────────
 
     def initialize_schema(self) -> None:
-        """Create indexes and seed tumor type/grade nodes."""
+        """Create indexes and seed tumor type/grade nodes + new entities."""
         try:
             self.graph.query("CREATE INDEX FOR (p:Patient) ON (p.mrn)")
             self.graph.query("CREATE INDEX FOR (s:Scan) ON (s.id)")
@@ -65,6 +75,10 @@ class FalkorDBService:
             self.graph.query("CREATE INDEX FOR (c:ClassificationResult) ON (c.job_id)")
             self.graph.query("CREATE INDEX FOR (d:DatasetImage) ON (d.path)")
             self.graph.query("CREATE INDEX FOR (t:TrainingRun) ON (t.id)")
+            self.graph.query("CREATE INDEX FOR (doc:Doctor) ON (doc.id)")
+            self.graph.query("CREATE INDEX FOR (al:AuditLog) ON (al.id)")
+            self.graph.query("CREATE INDEX FOR (mv:ModelVersion) ON (mv.id)")
+            self.graph.query("CREATE INDEX FOR (tag:Tag) ON (tag.name)")
         except Exception:
             pass  # indexes may already exist
 
@@ -91,18 +105,6 @@ class FalkorDBService:
                 "MERGE (g:TumorGrade {grade: $grade}) "
                 "SET g.severity = $severity, g.description = $desc",
                 {"grade": grade, "severity": severity, "desc": desc},
-            )
-
-        grade_type_map = {
-            "Grade II": "Meningioma",
-            "Grade III": "Pituitary",
-            "Grade IV": "Glioma",
-        }
-        for grade, tumor_type in grade_type_map.items():
-            self.graph.query(
-                "MATCH (g:TumorGrade {grade: $grade}), (t:TumorType {name: $ttype}) "
-                "MERGE (g)-[:BELONGS_TO]->(t)",
-                {"grade": grade, "ttype": tumor_type},
             )
 
         logger.info("FalkorDB schema initialized")
@@ -516,6 +518,183 @@ class FalkorDBService:
             return True
         except Exception:
             return False
+
+    # ── Doctor CRUD (M:N with Patient and InferenceJob) ───────────
+
+    def create_doctor(self, doctor_id: str, name: str, specialization: str,
+                      license_number: str, email: str) -> dict:
+        now = datetime.utcnow().isoformat()
+        self.graph.query(
+            "MERGE (d:Doctor {id: $id}) "
+            "ON CREATE SET d.name = $name, d.specialization = $spec, "
+            "  d.license_number = $lic, d.email = $email, d.created_at = $now "
+            "ON MATCH SET d.name = $name, d.specialization = $spec, "
+            "  d.license_number = $lic, d.email = $email",
+            {"id": doctor_id, "name": name, "spec": specialization,
+             "lic": license_number, "email": email, "now": now},
+        )
+        return {"id": doctor_id, "name": name, "specialization": specialization}
+
+    def get_doctor(self, doctor_id: str) -> dict | None:
+        result = self.graph.query(
+            "MATCH (d:Doctor {id: $id}) "
+            "RETURN d.id, d.name, d.specialization, d.license_number, d.email, d.created_at",
+            {"id": doctor_id},
+        )
+        if not result.result_set:
+            return None
+        r = result.result_set[0]
+        return {"id": r[0], "name": r[1], "specialization": r[2],
+                "license_number": r[3], "email": r[4], "created_at": r[5]}
+
+    def assign_doctor_to_patient(self, doctor_id: str, patient_mrn: str,
+                                 notes: str = "") -> None:
+        """M:N — A doctor can review many patients, a patient can be reviewed by many doctors."""
+        now = datetime.utcnow().isoformat()
+        self.graph.query(
+            "MATCH (d:Doctor {id: $did}), (p:Patient {mrn: $mrn}) "
+            "MERGE (d)-[r:REVIEWED]->(p) "
+            "SET r.reviewed_at = $now, r.notes = $notes, r.decision = 'pending'",
+            {"did": doctor_id, "mrn": patient_mrn, "notes": notes, "now": now},
+        )
+
+    def assign_doctor_to_job(self, doctor_id: str, job_id: str,
+                             priority: str = "normal") -> None:
+        """M:N — A doctor can be assigned to many jobs, a job can have many reviewers."""
+        now = datetime.utcnow().isoformat()
+        self.graph.query(
+            "MATCH (d:Doctor {id: $did}), (j:InferenceJob {id: $jid}) "
+            "MERGE (d)-[r:ASSIGNED_TO]->(j) "
+            "SET r.assigned_at = $now, r.priority = $priority, r.status = 'pending'",
+            {"did": doctor_id, "jid": job_id, "priority": priority, "now": now},
+        )
+
+    def get_doctor_patients(self, doctor_id: str) -> list[dict]:
+        """Get all patients reviewed by a specific doctor."""
+        result = self.graph.query(
+            "MATCH (d:Doctor {id: $did})-[r:REVIEWED]->(p:Patient) "
+            "RETURN p.mrn, r.reviewed_at, r.notes, r.decision "
+            "ORDER BY r.reviewed_at DESC",
+            {"did": doctor_id},
+        )
+        return [{"mrn": r[0], "reviewed_at": r[1], "notes": r[2], "decision": r[3]}
+                for r in result.result_set]
+
+    def get_patient_doctors(self, patient_mrn: str) -> list[dict]:
+        """Get all doctors who have reviewed a specific patient."""
+        result = self.graph.query(
+            "MATCH (d:Doctor)-[r:REVIEWED]->(p:Patient {mrn: $mrn}) "
+            "RETURN d.id, d.name, d.specialization, r.reviewed_at, r.decision "
+            "ORDER BY r.reviewed_at DESC",
+            {"mrn": patient_mrn},
+        )
+        return [{"id": r[0], "name": r[1], "specialization": r[2],
+                 "reviewed_at": r[3], "decision": r[4]}
+                for r in result.result_set]
+
+    # ── Tags (M:N with Scans) ────────────────────────────────────
+
+    def tag_scan(self, scan_id: str, tag_name: str) -> None:
+        """M:N — A scan can have many tags, a tag can apply to many scans."""
+        self.graph.query(
+            "MERGE (tag:Tag {name: $name})",
+            {"name": tag_name},
+        )
+        self.graph.query(
+            "MATCH (s:Scan {id: $sid}), (tag:Tag {name: $name}) "
+            "MERGE (s)-[:TAGGED_WITH]->(tag)",
+            {"sid": scan_id, "name": tag_name},
+        )
+
+    def get_scans_by_tag(self, tag_name: str) -> list[dict]:
+        result = self.graph.query(
+            "MATCH (s:Scan)-[:TAGGED_WITH]->(tag:Tag {name: $name}) "
+            "RETURN s.id, s.date, s.status",
+            {"name": tag_name},
+        )
+        return [{"id": r[0], "date": r[1], "status": r[2]} for r in result.result_set]
+
+    # ── Audit Log ─────────────────────────────────────────────────
+
+    def create_audit_log(self, action: str, entity_type: str, entity_id: str,
+                         actor: str, details: str = "") -> None:
+        log_id = str(uuid.uuid4())
+        now = datetime.utcnow().isoformat()
+        self.graph.query(
+            "CREATE (al:AuditLog {"
+            "  id: $id, action: $action, entity_type: $etype, entity_id: $eid, "
+            "  actor: $actor, timestamp: $ts, details: $details})",
+            {"id": log_id, "action": action, "etype": entity_type,
+             "eid": entity_id, "actor": actor, "ts": now, "details": details},
+        )
+
+    def get_audit_logs(self, entity_type: str | None = None, limit: int = 50) -> list[dict]:
+        if entity_type:
+            result = self.graph.query(
+                "MATCH (al:AuditLog {entity_type: $etype}) "
+                "RETURN al.id, al.action, al.entity_type, al.entity_id, "
+                "       al.actor, al.timestamp, al.details "
+                "ORDER BY al.timestamp DESC LIMIT $limit",
+                {"etype": entity_type, "limit": limit},
+            )
+        else:
+            result = self.graph.query(
+                "MATCH (al:AuditLog) "
+                "RETURN al.id, al.action, al.entity_type, al.entity_id, "
+                "       al.actor, al.timestamp, al.details "
+                "ORDER BY al.timestamp DESC LIMIT $limit",
+                {"limit": limit},
+            )
+        return [{"id": r[0], "action": r[1], "entity_type": r[2], "entity_id": r[3],
+                 "actor": r[4], "timestamp": r[5], "details": r[6]}
+                for r in result.result_set]
+
+    # ── Model Versioning ──────────────────────────────────────────
+
+    def create_model_version(self, model_name: str, version: str,
+                             accuracy: float, path: str) -> str:
+        version_id = str(uuid.uuid4())
+        now = datetime.utcnow().isoformat()
+        self.graph.query(
+            "CREATE (mv:ModelVersion {"
+            "  id: $id, model_name: $name, version: $ver, accuracy: $acc, "
+            "  path: $path, created_at: $now, status: 'active'})",
+            {"id": version_id, "name": model_name, "ver": version,
+             "acc": accuracy, "path": path, "now": now},
+        )
+        # Link to previous version (SUPERSEDES chain)
+        self.graph.query(
+            "MATCH (new:ModelVersion {id: $new_id}), "
+            "      (old:ModelVersion {model_name: $name, status: 'active'}) "
+            "WHERE old.id <> $new_id "
+            "SET old.status = 'superseded' "
+            "MERGE (new)-[:SUPERSEDES]->(old)",
+            {"new_id": version_id, "name": model_name},
+        )
+        return version_id
+
+    def get_model_versions(self, model_name: str) -> list[dict]:
+        result = self.graph.query(
+            "MATCH (mv:ModelVersion {model_name: $name}) "
+            "RETURN mv.id, mv.version, mv.accuracy, mv.path, mv.status, mv.created_at "
+            "ORDER BY mv.created_at DESC",
+            {"name": model_name},
+        )
+        return [{"id": r[0], "version": r[1], "accuracy": r[2],
+                 "path": r[3], "status": r[4], "created_at": r[5]}
+                for r in result.result_set]
+
+    def get_active_model_version(self, model_name: str) -> dict | None:
+        result = self.graph.query(
+            "MATCH (mv:ModelVersion {model_name: $name, status: 'active'}) "
+            "RETURN mv.id, mv.version, mv.accuracy, mv.path, mv.created_at "
+            "ORDER BY mv.created_at DESC LIMIT 1",
+            {"name": model_name},
+        )
+        if not result.result_set:
+            return None
+        r = result.result_set[0]
+        return {"id": r[0], "version": r[1], "accuracy": r[2], "path": r[3], "created_at": r[4]}
 
 
 # Singleton

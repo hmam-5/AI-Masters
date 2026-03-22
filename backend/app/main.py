@@ -2,15 +2,20 @@
 Main FastAPI application entry point.
 
 Initializes the framework, middleware, event handlers, and routes.
+Includes rate limiting, Prometheus metrics, and OpenTelemetry tracing.
 """
 
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
+
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from app.api import router
 from app.config import get_settings
@@ -23,6 +28,13 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# Rate limiter (backed by Redis for distributed deployments)
+limiter = Limiter(
+    key_func=get_remote_address,
+    default_limits=["200/minute"],
+    storage_uri=settings.redis_url,
+)
 
 
 @asynccontextmanager
@@ -69,6 +81,44 @@ app = FastAPI(
     version=settings.app_version,
     lifespan=lifespan,
 )
+
+# Attach rate limiter
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Prometheus metrics — exposes /metrics endpoint
+try:
+    from prometheus_fastapi_instrumentator import Instrumentator
+    instrumentator = Instrumentator(
+        should_group_status_codes=True,
+        should_ignore_untemplated=True,
+        excluded_handlers=["/metrics", "/health"],
+    )
+    instrumentator.instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
+    logger.info("Prometheus metrics enabled at /metrics")
+except ImportError:
+    logger.warning("prometheus-fastapi-instrumentator not installed — metrics disabled")
+
+# OpenTelemetry distributed tracing
+try:
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.exporter.jaeger.thrift import JaegerExporter
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+    tracer_provider = TracerProvider()
+    jaeger_exporter = JaegerExporter(
+        agent_host_name=settings.jaeger_host,
+        agent_port=settings.jaeger_port,
+    )
+    tracer_provider.add_span_processor(BatchSpanProcessor(jaeger_exporter))
+    trace.set_tracer_provider(tracer_provider)
+
+    FastAPIInstrumentor.instrument_app(app)
+    logger.info(f"OpenTelemetry tracing enabled → Jaeger at {settings.jaeger_host}:{settings.jaeger_port}")
+except Exception as e:
+    logger.warning(f"OpenTelemetry tracing not available: {e}")
 
 # Middleware
 # CORS
