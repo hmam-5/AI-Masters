@@ -27,10 +27,8 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["http://localhost", "http://localhost:3000", "http://localhost:8000"]
     api_prefix: str = "/api/v1"
 
-    # Redis & Celery
+    # Redis (rate limiting + caching)
     redis_url: str = "redis://redis:6379/0"
-    celery_broker_url: str = "redis://redis:6379/0"
-    celery_result_backend: str = "redis://redis:6379/1"
 
     # FalkorDB Graph Database
     falkordb_host: str = "falkordb"

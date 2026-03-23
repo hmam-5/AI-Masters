@@ -3,7 +3,6 @@ uvicorn[standard]==0.24.0
 pydantic==2.5.0
 pydantic-settings==2.1.0
 python-multipart==0.0.6
-celery==5.3.4
 redis==5.0.1
 torch==2.2.2
 torchvision==0.17.2
@@ -35,7 +34,6 @@ opentelemetry-sdk==1.22.0
 opentelemetry-exporter-jaeger==1.21.0
 opentelemetry-instrumentation-fastapi==0.43b0
 opentelemetry-instrumentation-redis==0.43b0
-opentelemetry-instrumentation-celery==0.43b0
 
 # ONNX Runtime for optimized inference
 onnx>=1.15.0

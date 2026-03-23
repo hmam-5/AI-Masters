@@ -17,15 +17,12 @@ All datasets are downloaded to /data/ and organized into:
       glioma/ meningioma/ pituitary/ no_tumor/
 """
 
-import hashlib
 import logging
 import os
 import shutil
 import zipfile
 from pathlib import Path
 from typing import Optional
-
-import requests
 
 logger = logging.getLogger(__name__)
 
