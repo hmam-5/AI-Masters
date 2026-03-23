@@ -76,25 +76,33 @@ class DenseNetClassifier(nn.Module):
         return self.backbone(x)
 
 
-# Registry mapping model names to classes and their save paths
-MODEL_REGISTRY = {
-    "custom_cnn": {
-        "path": "/models/brain_tumor_2d.pth",
-        "weight": 1.0,
-    },
-    "resnet50": {
-        "class": ResNet50Classifier,
-        "path": "/models/brain_tumor_resnet50.pth",
-        "weight": 1.5,  # higher weight — pretrained backbone
-    },
-    "efficientnet": {
-        "class": EfficientNetClassifier,
-        "path": "/models/brain_tumor_efficientnet.pth",
-        "weight": 1.5,
-    },
-    "densenet": {
-        "class": DenseNetClassifier,
-        "path": "/models/brain_tumor_densenet.pth",
-        "weight": 1.3,
-    },
-}
+from app.config import get_settings
+
+# Registry mapping model names to classes and their save paths.
+# Paths come from settings (which reads from .env), so they work
+# in both Docker (/models/) and local dev (../models/) modes.
+def _build_registry() -> dict:
+    s = get_settings()
+    return {
+        "custom_cnn": {
+            "path": s.model_2d_path,
+            "weight": 1.0,
+        },
+        "resnet50": {
+            "class": ResNet50Classifier,
+            "path": s.model_resnet50_path,
+            "weight": 1.5,
+        },
+        "efficientnet": {
+            "class": EfficientNetClassifier,
+            "path": s.model_efficientnet_path,
+            "weight": 1.5,
+        },
+        "densenet": {
+            "class": DenseNetClassifier,
+            "path": s.model_densenet_path,
+            "weight": 1.3,
+        },
+    }
+
+MODEL_REGISTRY = _build_registry()

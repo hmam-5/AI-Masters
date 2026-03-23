@@ -1,8 +1,7 @@
 """Workers package."""
 
-from app.workers.celery_worker import celery_app, run_tumor_inference
+from app.workers.sync_inference import run_inference_sync
 
 __all__ = [
-    "celery_app",
-    "run_tumor_inference",
+    "run_inference_sync",
 ]

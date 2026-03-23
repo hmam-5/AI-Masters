@@ -29,12 +29,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Rate limiter (backed by Redis for distributed deployments)
-limiter = Limiter(
-    key_func=get_remote_address,
-    default_limits=["200/minute"],
-    storage_uri=settings.redis_url,
-)
+# Rate limiter (backed by Redis for distributed deployments, or in-memory for local)
+try:
+    if getattr(settings, "use_sync_inference", False):
+        # Local mode: use in-memory rate limiting
+        limiter = Limiter(
+            key_func=get_remote_address,
+            default_limits=["1000/minute"],
+            storage_uri="memory://",
+        )
+        logger.info("Rate limiter using in-memory storage (local mode)")
+    else:
+        limiter = Limiter(
+            key_func=get_remote_address,
+            default_limits=["200/minute"],
+            storage_uri=settings.redis_url,
+        )
+except Exception as e:
+    logger.warning(f"Redis not available for rate limiting, using in-memory: {e}")
+    limiter = Limiter(
+        key_func=get_remote_address,
+        default_limits=["1000/minute"],
+        storage_uri="memory://",
+    )
 
 
 @asynccontextmanager
@@ -46,18 +63,24 @@ async def lifespan(app: FastAPI):
     """
     # Startup
     logger.info("Starting Brain Tumor AI Framework")
+    logger.info(f"Storage backend: {settings.storage_backend}")
+    logger.info(f"Sync inference mode: {getattr(settings, 'use_sync_inference', False)}")
 
-    # Ensure MinIO buckets exist
+    # Ensure storage is ready
     try:
         from app.services.storage import get_storage_backend
         storage = get_storage_backend()
-        if hasattr(storage, 'client'):
+        
+        # Only create MinIO buckets if using MinIO
+        if settings.storage_backend == "minio" and hasattr(storage, 'client'):
             for bucket in [settings.minio_bucket_dicom, settings.minio_bucket_results]:
                 if not storage.client.bucket_exists(bucket):
                     storage.client.make_bucket(bucket)
                     logger.info(f"Created MinIO bucket: {bucket}")
+        elif settings.storage_backend == "local":
+            logger.info(f"Using local filesystem storage at: {getattr(settings, 'local_storage_dir', './data/uploads')}")
     except Exception as e:
-        logger.error(f"Failed to initialize storage buckets: {e}")
+        logger.warning(f"Storage initialization warning (non-fatal in local mode): {e}")
 
     # Initialize FalkorDB schema
     try:

@@ -130,34 +130,80 @@ docker compose down -v
 
 ---
 
-## Local Development (Without Docker)
+## Local Development (Without Docker) — EASY MODE
 
-If you want to run the backend and frontend **without Docker** (e.g., for development or quick testing):
+If you want to run the project **without Docker** (e.g., for development, quick testing, or if Docker doesn't work on your machine), follow these steps:
 
-### Prerequisites
+### What You Need
 
-- **Python 3.11+** (for the backend)
-- **Node.js 18+** (for the frontend)
+- **Python 3.11+**
+- **Node.js 18+**
+- **One Docker container** (optional, for FalkorDB graph database)
 
-### Backend
+### Step 1 — Set Up the Backend
 
-```bash
+```powershell
+# Open terminal in project folder
 cd backend
+
+# Create virtual environment
+python -m venv .venv
+
+# Activate it (Windows)
+.\.venv\Scripts\Activate.ps1
+
+# Install dependencies
 pip install -r requirements.txt
+
+# Copy local config (important!)
+copy .env.local .env
+```
+
+### Step 2 — Start FalkorDB (Optional)
+
+If you have Docker installed, run just the database:
+
+```powershell
+docker run -d -p 6381:6379 --name falkordb falkordb/falkordb:latest
+```
+
+> **Note:** If you don't have Docker or skip this, the app will show warnings but still work for basic testing.
+
+### Step 3 — Start the Backend
+
+```powershell
+cd backend
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-> **Note:** Some services (Redis, FalkorDB, MinIO) won't be available without Docker. The backend will start with warnings but the API docs will work at http://localhost:8000/docs.
+The API is now running at **http://localhost:8000** (docs at http://localhost:8000/docs).
 
-### Frontend
+### Step 4 — Start the Frontend
 
-```bash
+Open a **new terminal**:
+
+```powershell
 cd frontend
 npm install
 npm run dev
 ```
 
-The frontend dev server starts at **http://localhost:3000** and proxies `/api` requests to the backend at `localhost:8000`.
+The frontend starts at **http://localhost:5173** (or http://localhost:3000).
+
+### What's Different in Local Mode?
+
+| Feature | Docker Mode | Local Mode |
+|---------|-------------|------------|
+| File storage | MinIO (S3) | Local filesystem (`./data/uploads/`) |
+| Inference | Celery + Redis (async) | Synchronous (in-process) |
+| Database | FalkorDB container | FalkorDB container (optional) |
+| Monitoring | Jaeger, Prometheus, Grafana | Disabled (logs only) |
+
+**Your AI model, accuracy, and results are identical in both modes!**
+
+---
+
+## Local Development (Advanced)
 
 ---
 

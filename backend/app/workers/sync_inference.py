@@ -1,92 +1,48 @@
 """
-Celery worker configuration and task definitions.
+Synchronous inference for local development.
 
-Handles asynchronous inference for segmentation and classification.
+This module provides the same inference logic as the Celery worker,
+but runs synchronously (blocking) without requiring Redis/Celery.
+
+Use this when `use_sync_inference=True` in settings.
 """
 
+import io
 import logging
+from datetime import datetime
 from typing import Optional
 
-from celery import Celery, Task
-from celery.utils.log import get_task_logger
+import torch
+from PIL import Image
 
 from app.config import get_settings
+from app.dataset.ensemble import EnsembleEngine
+from app.dataset.trainer import CLASSES
+from app.models.database import JobStatus
+from app.services.graph_db import get_falkordb
+from app.services.storage import get_storage_backend
 
+logger = logging.getLogger(__name__)
 settings = get_settings()
 
-# Configure Celery
-celery_app = Celery(
-    "brain_tumor_ai",
-    broker=settings.celery_broker_url,
-    backend=settings.celery_result_backend,
-)
 
-# Celery configuration
-celery_app.conf.update(
-    task_serializer="json",
-    accept_content=["json"],
-    result_serializer="json",
-    timezone="UTC",
-    enable_utc=True,
-    task_track_started=True,
-    task_time_limit=settings.celery_task_time_limit,
-    task_soft_time_limit=settings.celery_task_soft_time_limit,
-    worker_prefetch_multiplier=1,
-    worker_max_tasks_per_child=1000,
-)
-
-logger = get_task_logger(__name__)
-
-
-class CallbackTask(Task):
-    """Task base class with callbacks for progress updates."""
-
-    def on_retry(self, exc, task_id, args, kwargs, einfo):
-        """Called when task is retried."""
-        logger.warning(f"Task {task_id} is being retried: {exc}")
-
-    def on_failure(self, exc, task_id, args, kwargs, einfo):
-        """Called when task fails."""
-        logger.error(f"Task {task_id} failed: {exc}")
-
-    def on_success(self, result, task_id, args, kwargs):
-        """Called when task succeeds."""
-        logger.info(f"Task {task_id} completed successfully")
-
-
-celery_app.Task = CallbackTask
-
-
-@celery_app.task(bind=True, max_retries=3)
-def run_tumor_inference(
-    self,
+def run_inference_sync(
     job_id: str,
     scan_id: str,
     modality_paths: dict[str, str],
 ) -> dict:
     """
-    Execute tumor analysis inference using multi-model ensemble.
+    Execute tumor analysis inference synchronously (no Celery).
 
-    All persistence is handled via FalkorDB.
+    This is the same logic as run_tumor_inference but runs in-process.
+    Use this for local development without Redis/Celery.
     """
-    import io
-    from datetime import datetime
-
-    import torch
-    from PIL import Image
-
-    from app.dataset.ensemble import EnsembleEngine
-    from app.dataset.trainer import CLASSES
-    from app.models.database import JobStatus
-    from app.services.graph_db import get_falkordb
-    from app.services.storage import get_storage_backend
-
     device = "cuda" if torch.cuda.is_available() else "cpu"
     storage = get_storage_backend()
     gdb = get_falkordb()
 
     try:
-        logger.info(f"Starting ensemble inference for job {job_id}")
+        logger.info(f"[SYNC] Starting ensemble inference for job {job_id}")
 
         # Update job status
         job = gdb.get_job(job_id)
@@ -95,15 +51,13 @@ def run_tumor_inference(
 
         gdb.update_job(job_id, status=JobStatus.PROCESSING.value,
                        started_at=datetime.utcnow().isoformat(), progress_percentage=10)
-        self.update_state(state="PROGRESS", meta={"progress": 10, "stage": "loading"})
 
         # 1. Load and preprocess image
-        logger.info("Loading image from storage")
+        logger.info("[SYNC] Loading image from storage")
         is_regular_image = modality_paths.get("is_regular_image", False)
         image_path = modality_paths.get("image_path", "")
 
         gdb.update_job(job_id, progress_percentage=20)
-        self.update_state(state="PROGRESS", meta={"progress": 20, "stage": "preprocessing"})
 
         if is_regular_image and image_path:
             image_bytes = storage.download_file(image_path)
@@ -112,23 +66,20 @@ def run_tumor_inference(
             pil_image = Image.new("RGB", (settings.image_size, settings.image_size))
 
         gdb.update_job(job_id, progress_percentage=30)
-        self.update_state(state="PROGRESS", meta={"progress": 30, "stage": "preprocessing_done"})
 
         # 2. Load ensemble (all 4 models)
-        logger.info("Loading multi-model ensemble")
+        logger.info("[SYNC] Loading multi-model ensemble")
         gdb.update_job(job_id, progress_percentage=40)
-        self.update_state(state="PROGRESS", meta={"progress": 40, "stage": "loading_ensemble"})
 
         ensemble = EnsembleEngine(device=device, image_size=settings.image_size)
         models_loaded = ensemble.num_models
-        logger.info(f"Ensemble loaded {models_loaded} models: {ensemble.model_names}")
+        logger.info(f"[SYNC] Ensemble loaded {models_loaded} models: {ensemble.model_names}")
         if models_loaded == 0:
             raise RuntimeError("No trained models found. Run training before inference.")
 
         # 3. Run ensemble classification with Test-Time Augmentation
-        logger.info("Running ensemble classification with TTA")
+        logger.info("[SYNC] Running ensemble classification with TTA")
         gdb.update_job(job_id, progress_percentage=60)
-        self.update_state(state="PROGRESS", meta={"progress": 60, "stage": "ensemble_classification"})
 
         grade_mapping = {
             "glioma": "Grade IV",
@@ -148,6 +99,7 @@ def run_tumor_inference(
         predicted_class = ensemble_result["predicted_class"]
         top_confidence = ensemble_result["confidence"]
         min_conf_for_auto = float(getattr(settings, "min_confidence_for_auto_decision", 0.99))
+
         auto_decision = top_confidence >= min_conf_for_auto
         predicted_grade = grade_mapping.get(predicted_class, "Unknown")
         predicted_tumor_type = tumor_type_mapping.get(predicted_class)
@@ -159,9 +111,8 @@ def run_tumor_inference(
             predicted_tumor_type = None
 
         # 4. Compare with historical high-confidence cases in FalkorDB
-        logger.info("Comparing with historical cases")
+        logger.info("[SYNC] Comparing with historical cases")
         gdb.update_job(job_id, progress_percentage=75)
-        self.update_state(state="PROGRESS", meta={"progress": 75, "stage": "case_comparison"})
 
         segmentation_results = []
         similar_cases = []
@@ -169,12 +120,11 @@ def run_tumor_inference(
             try:
                 similar_cases = gdb.find_similar_cases(predicted_grade, min_confidence=0.9)
             except Exception as compare_err:
-                logger.warning(f"Similar case comparison failed (non-fatal): {compare_err}")
+                logger.warning(f"[SYNC] Similar case comparison failed (non-fatal): {compare_err}")
 
         # 5. Save classification result
-        logger.info("Saving classification results")
+        logger.info("[SYNC] Saving classification results")
         gdb.update_job(job_id, progress_percentage=85)
-        self.update_state(state="PROGRESS", meta={"progress": 85, "stage": "saving"})
 
         classification_details = {
             "probabilities": {
@@ -204,9 +154,8 @@ def run_tumor_inference(
         )
 
         # 6. Store analysis result in graph (for analytics)
-        logger.info("Storing analysis result in FalkorDB graph")
+        logger.info("[SYNC] Storing analysis result in FalkorDB graph")
         gdb.update_job(job_id, progress_percentage=90)
-        self.update_state(state="PROGRESS", meta={"progress": 90, "stage": "graph_storage"})
 
         try:
             scan = gdb.get_scan(scan_id)
@@ -223,14 +172,14 @@ def run_tumor_inference(
                 classification_details=classification_details,
             )
         except Exception as graph_err:
-            logger.warning(f"Failed to store analysis graph (non-fatal): {graph_err}")
+            logger.warning(f"[SYNC] Failed to store analysis graph (non-fatal): {graph_err}")
 
         # 7. Mark complete
         gdb.update_job(job_id, status=JobStatus.COMPLETED.value,
                        completed_at=datetime.utcnow().isoformat(), progress_percentage=100)
 
         logger.info(
-            f"Ensemble inference completed for job {job_id} — final={final_predicted_class}, "
+            f"[SYNC] Ensemble inference completed for job {job_id} — final={final_predicted_class}, "
             f"raw={predicted_class}, conf={top_confidence:.4f}, auto_decision={auto_decision}, "
             f"models={models_loaded}, agreement={ensemble_result.get('agreement_score', 0):.2f}"
         )
@@ -253,14 +202,11 @@ def run_tumor_inference(
         }
 
     except Exception as e:
-        logger.error(f"Inference failed: {str(e)}", exc_info=True)
+        logger.error(f"[SYNC] Inference failed: {str(e)}", exc_info=True)
         try:
             gdb.update_job(job_id, status=JobStatus.FAILED.value,
                            error_message=str(e),
                            completed_at=datetime.utcnow().isoformat())
         except Exception as db_error:
-            logger.error(f"Failed to update job status: {str(db_error)}")
-
-        if isinstance(e, (IOError, OSError)):
-            raise self.retry(exc=e, countdown=60, max_retries=3)
+            logger.error(f"[SYNC] Failed to update job status: {str(db_error)}")
         raise

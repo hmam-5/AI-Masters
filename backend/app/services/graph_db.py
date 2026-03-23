@@ -697,13 +697,269 @@ class FalkorDBService:
         return {"id": r[0], "version": r[1], "accuracy": r[2], "path": r[3], "created_at": r[4]}
 
 
-# Singleton
-_falkordb_instance: Optional[FalkorDBService] = None
+# ── In-Memory Fallback (no FalkorDB required) ────────────────────
+
+class InMemoryGraphDB:
+    """
+    In-memory stub that implements the same interface as FalkorDBService.
+
+    Used when skip_falkordb=True or FalkorDB is unreachable.
+    Data lives only for the duration of the process — good enough for
+    local development and demo/testing without Docker.
+    """
+
+    def __init__(self):
+        self._patients: dict[str, dict] = {}
+        self._scans: dict[str, dict] = {}
+        self._jobs: dict[str, dict] = {}
+        self._classifications: dict[str, list[dict]] = {}
+        self._segmentations: dict[str, list[dict]] = {}
+        self._analysis_results: list[dict] = []
+        self._doctors: dict[str, dict] = {}
+        self._doctor_patients: dict[str, list[str]] = {}
+        self._patient_doctors: dict[str, list[str]] = {}
+        self._doctor_jobs: dict[str, list[str]] = {}
+        self._scan_tags: dict[str, list[str]] = {}
+        self._tag_scans: dict[str, list[str]] = {}
+        self._audit_logs: list[dict] = []
+        self._model_versions: list[dict] = []
+        self._users: dict[str, dict] = {}
+        logger.info("Using in-memory graph database (FalkorDB not available)")
+
+    # ── Schema ────────────────────────────────────────────────────
+    def initialize_schema(self) -> None:
+        logger.info("In-memory graph DB: schema init (no-op)")
+
+    # ── Patient ───────────────────────────────────────────────────
+    def create_patient(self, mrn: str, date_of_birth: str, sex: str | None = None) -> dict:
+        now = datetime.utcnow().isoformat()
+        self._patients[mrn] = {"mrn": mrn, "dob": date_of_birth, "sex": sex or "Unknown",
+                               "created_at": now, "updated_at": now}
+        return self._patients[mrn]
+
+    def get_patient(self, mrn: str) -> dict | None:
+        return self._patients.get(mrn)
+
+    def get_or_create_demo_patient(self) -> dict:
+        mrn = "DEMO-0001"
+        if mrn not in self._patients:
+            self.create_patient(mrn, "1990-01-01", "Unknown")
+        return self._patients[mrn]
+
+    # ── Scan ──────────────────────────────────────────────────────
+    def create_scan(self, scan_id: str, patient_mrn: str, modalities: list[str], storage_location: str = "") -> dict:
+        now = datetime.utcnow().isoformat()
+        self._scans[scan_id] = {"id": scan_id, "patient_mrn": patient_mrn,
+                                "modalities": modalities, "storage_location": storage_location,
+                                "date": now, "status": "uploaded"}
+        return self._scans[scan_id]
+
+    def get_scan(self, scan_id: str) -> dict | None:
+        return self._scans.get(scan_id)
+
+    def update_scan_storage(self, scan_id: str, storage_location: str) -> None:
+        if scan_id in self._scans:
+            self._scans[scan_id]["storage_location"] = storage_location
+
+    # ── Job ───────────────────────────────────────────────────────
+    def create_job(self, job_id: str, scan_id: str) -> dict:
+        now = datetime.utcnow().isoformat()
+        self._jobs[job_id] = {"id": job_id, "scan_id": scan_id, "status": "pending",
+                              "progress_percentage": 0, "started_at": None,
+                              "completed_at": None, "error_message": None,
+                              "celery_task_id": None, "created_at": now}
+        return self._jobs[job_id]
+
+    def get_job(self, job_id: str) -> dict | None:
+        return self._jobs.get(job_id)
+
+    def update_job(self, job_id: str, **fields) -> None:
+        if job_id in self._jobs:
+            self._jobs[job_id].update(fields)
+
+    # ── Classification ────────────────────────────────────────────
+    def save_classification_result(self, job_id: str, tumor_grade: str,
+                                   confidence_score: float,
+                                   classification_details: dict | None = None) -> None:
+        entry = {"job_id": job_id, "tumor_grade": tumor_grade,
+                 "confidence_score": confidence_score,
+                 "classification_details": classification_details or {},
+                 "created_at": datetime.utcnow().isoformat()}
+        self._classifications.setdefault(job_id, []).append(entry)
+
+    def get_classification_results(self, job_id: str) -> list[dict]:
+        return self._classifications.get(job_id, [])
+
+    # ── Segmentation ──────────────────────────────────────────────
+    def save_segmentation_result(self, job_id: str, subregion: str,
+                                 confidence_score: float, volume_mm3: float,
+                                 mask_storage_path: str = "") -> None:
+        entry = {"job_id": job_id, "subregion": subregion,
+                 "confidence_score": confidence_score, "volume_mm3": volume_mm3,
+                 "mask_storage_path": mask_storage_path}
+        self._segmentations.setdefault(job_id, []).append(entry)
+
+    def get_segmentation_results(self, job_id: str) -> list[dict]:
+        return self._segmentations.get(job_id, [])
+
+    # ── Analysis Result ───────────────────────────────────────────
+    def store_analysis_result(self, job_id: str, patient_mrn: str, scan_id: str,
+                              tumor_grade: str, confidence: float,
+                              tumor_type: Optional[str],
+                              segmentation_results: list[dict],
+                              classification_details: Optional[dict] = None) -> None:
+        self._analysis_results.append({
+            "job_id": job_id, "patient_mrn": patient_mrn, "scan_id": scan_id,
+            "grade": tumor_grade, "confidence": confidence,
+            "tumor_type": tumor_type, "timestamp": datetime.utcnow().isoformat(),
+            "segmentation_results": segmentation_results,
+            "classification_details": classification_details,
+        })
+
+    # ── Dataset / Training ────────────────────────────────────────
+    def store_dataset_metadata(self, images: list[dict], source_dataset: str) -> None:
+        pass  # no-op in memory mode
+
+    def store_training_run(self, run_id: str, accuracy: float, epochs: int,
+                           model_path: str, class_distribution: dict) -> None:
+        pass
+
+    # ── Analytics ─────────────────────────────────────────────────
+    def get_analysis_history(self, patient_mrn: str) -> list[dict]:
+        return [r for r in self._analysis_results if r.get("patient_mrn") == patient_mrn]
+
+    def get_grade_statistics(self) -> dict:
+        stats: dict[str, int] = {}
+        for r in self._analysis_results:
+            g = r.get("grade", "Unknown")
+            stats[g] = stats.get(g, 0) + 1
+        return stats
+
+    def get_dataset_overview(self) -> dict:
+        return {"total_images": 0, "classes": {}, "splits": {}}
+
+    def get_training_history(self) -> list[dict]:
+        return []
+
+    def find_similar_cases(self, tumor_grade: str, min_confidence: float = 0.8) -> list[dict]:
+        return [r for r in self._analysis_results
+                if r.get("grade") == tumor_grade and r.get("confidence", 0) >= min_confidence]
+
+    def ping(self) -> bool:
+        return True
+
+    # ── Doctor ────────────────────────────────────────────────────
+    def create_doctor(self, doctor_id: str, name: str, specialization: str,
+                      license_number: str, email: str) -> dict:
+        now = datetime.utcnow().isoformat()
+        doc = {"id": doctor_id, "name": name, "specialization": specialization,
+               "license_number": license_number, "email": email, "created_at": now}
+        self._doctors[doctor_id] = doc
+        return doc
+
+    def get_doctor(self, doctor_id: str) -> dict | None:
+        return self._doctors.get(doctor_id)
+
+    def assign_doctor_to_patient(self, doctor_id: str, patient_mrn: str, notes: str = "") -> None:
+        self._doctor_patients.setdefault(doctor_id, []).append(patient_mrn)
+        self._patient_doctors.setdefault(patient_mrn, []).append(doctor_id)
+
+    def assign_doctor_to_job(self, doctor_id: str, job_id: str, priority: str = "normal") -> None:
+        self._doctor_jobs.setdefault(doctor_id, []).append(job_id)
+
+    def get_doctor_patients(self, doctor_id: str) -> list[dict]:
+        mrns = self._doctor_patients.get(doctor_id, [])
+        return [self._patients[m] for m in mrns if m in self._patients]
+
+    def get_patient_doctors(self, patient_mrn: str) -> list[dict]:
+        doc_ids = self._patient_doctors.get(patient_mrn, [])
+        return [self._doctors[d] for d in doc_ids if d in self._doctors]
+
+    # ── Tags ──────────────────────────────────────────────────────
+    def tag_scan(self, scan_id: str, tag_name: str) -> None:
+        self._scan_tags.setdefault(scan_id, []).append(tag_name)
+        self._tag_scans.setdefault(tag_name, []).append(scan_id)
+
+    def get_scans_by_tag(self, tag_name: str) -> list[dict]:
+        scan_ids = self._tag_scans.get(tag_name, [])
+        return [self._scans[s] for s in scan_ids if s in self._scans]
+
+    # ── Audit Log ─────────────────────────────────────────────────
+    def create_audit_log(self, action: str, entity_type: str, entity_id: str,
+                         actor: str = "system", details: str = "") -> None:
+        self._audit_logs.append({
+            "id": str(uuid.uuid4()), "action": action, "entity_type": entity_type,
+            "entity_id": entity_id, "actor": actor, "details": details,
+            "timestamp": datetime.utcnow().isoformat(),
+        })
+
+    def get_audit_logs(self, entity_type: str | None = None, limit: int = 50) -> list[dict]:
+        logs = self._audit_logs
+        if entity_type:
+            logs = [l for l in logs if l.get("entity_type") == entity_type]
+        return logs[-limit:]
+
+    # ── Model Versioning ──────────────────────────────────────────
+    def create_model_version(self, model_name: str, version: str,
+                             accuracy: float, path: str,
+                             previous_version_id: str | None = None) -> dict:
+        mv = {"id": str(uuid.uuid4()), "model_name": model_name, "version": version,
+              "accuracy": accuracy, "path": path, "status": "active",
+              "created_at": datetime.utcnow().isoformat()}
+        self._model_versions.append(mv)
+        return mv
+
+    def get_model_versions(self, model_name: str) -> list[dict]:
+        return [m for m in self._model_versions if m.get("model_name") == model_name]
+
+    def get_active_model_version(self, model_name: str) -> dict | None:
+        for m in reversed(self._model_versions):
+            if m.get("model_name") == model_name and m.get("status") == "active":
+                return m
+        return None
+
+    # ── Graph property (for routes that access gdb.graph directly) ─
+    @property
+    def graph(self):
+        """Return self so gdb.graph.query() calls are handled by __query_noop."""
+        return self
+
+    def query(self, *args, **kwargs):
+        """No-op query that returns an empty result set."""
+
+        class _EmptyResult:
+            result_set = []
+
+        return _EmptyResult()
 
 
-def get_falkordb() -> FalkorDBService:
-    """Get the FalkorDB service singleton."""
+# ── Singleton ─────────────────────────────────────────────────────
+
+_falkordb_instance = None
+
+
+def get_falkordb():
+    """Get the graph DB service singleton.
+
+    Returns InMemoryGraphDB when skip_falkordb is True or FalkorDB is unreachable.
+    """
     global _falkordb_instance
-    if _falkordb_instance is None:
-        _falkordb_instance = FalkorDBService()
+    if _falkordb_instance is not None:
+        return _falkordb_instance
+
+    if settings.skip_falkordb:
+        logger.info("skip_falkordb=True → using in-memory graph database")
+        _falkordb_instance = InMemoryGraphDB()
+        return _falkordb_instance
+
+    # Try real FalkorDB, fall back to in-memory on connection failure
+    try:
+        svc = FalkorDBService()
+        svc.db  # trigger lazy connection
+        _falkordb_instance = svc
+        logger.info("Connected to FalkorDB")
+    except Exception as e:
+        logger.warning(f"FalkorDB unavailable ({e}) → falling back to in-memory graph database")
+        _falkordb_instance = InMemoryGraphDB()
+
     return _falkordb_instance

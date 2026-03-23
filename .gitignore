@@ -1,5 +1,11 @@
 # Ignored files and directories
 
+# Credentials
+.kaggle/
+
+# Uploaded data
+backend/data/
+
 # Python
 __pycache__/
 *.py[cod]

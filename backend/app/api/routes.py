@@ -32,32 +32,50 @@ from app.schemas import (
 from app.services.graph_db import get_falkordb
 from app.services.storage import get_storage_backend
 from app.utils.validators import ImageValidationError, NIfTIValidator, DICOMValidator, RegularImageValidator
-from app.workers import run_tumor_inference
+from app.workers.sync_inference import run_inference_sync
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["medical-imaging"])
 settings = get_settings()
 
 # Rate limiter instance (uses the same backend as the one in main.py)
-limiter = Limiter(key_func=get_remote_address, storage_uri=settings.redis_url)
+# In local mode, this may use in-memory storage
+try:
+    if getattr(settings, "use_sync_inference", False):
+        limiter = Limiter(key_func=get_remote_address, storage_uri="memory://")
+    else:
+        limiter = Limiter(key_func=get_remote_address, storage_uri=settings.redis_url)
+except Exception:
+    limiter = Limiter(key_func=get_remote_address, storage_uri="memory://")
 
-# --- Redis Cache Utility ---
+# --- Redis Cache Utility (skipped in local mode) ---
 _redis_cache = None
+_use_redis_cache = not getattr(settings, "use_sync_inference", False)
 
 def _get_redis_cache():
     """Lazy-init a Redis client for response caching (uses DB 2)."""
     global _redis_cache
+    if not _use_redis_cache:
+        return None
     if _redis_cache is None:
-        import redis as redis_lib
-        _redis_cache = redis_lib.Redis.from_url(
-            settings.redis_url.replace("/0", "/2"), decode_responses=True
-        )
+        try:
+            import redis as redis_lib
+            _redis_cache = redis_lib.Redis.from_url(
+                settings.redis_url.replace("/0", "/2"), decode_responses=True
+            )
+            # Test connection
+            _redis_cache.ping()
+        except Exception:
+            return None
     return _redis_cache
 
 
 def _cache_get(key: str):
     try:
-        data = _get_redis_cache().get(key)
+        cache = _get_redis_cache()
+        if cache is None:
+            return None
+        data = cache.get(key)
         return json.loads(data) if data else None
     except Exception:
         return None
@@ -65,7 +83,10 @@ def _cache_get(key: str):
 
 def _cache_set(key: str, value, ttl: int = 60):
     try:
-        _get_redis_cache().setex(key, ttl, json.dumps(value))
+        cache = _get_redis_cache()
+        if cache is None:
+            return
+        cache.setex(key, ttl, json.dumps(value))
     except Exception:
         pass
 
@@ -160,23 +181,22 @@ async def analyze_image(
     job_id = str(uuid.uuid4())
     gdb.create_job(job_id, scan_id)
 
-    # Start Celery task
+    # Run inference: either synchronously (local dev) or via Celery (production)
+    modality_data = {
+        "image_path": storage_path,
+        "filename": file.filename,
+        "is_regular_image": is_regular_image,
+        "metadata": metadata,
+    }
+
     try:
-        celery_task = run_tumor_inference.apply_async(
-            args=[job_id, scan_id, {
-                "image_path": storage_path,
-                "filename": file.filename,
-                "is_regular_image": is_regular_image,
-                "metadata": metadata,
-            }],
-            task_id=job_id,
-        )
-        gdb.update_job(job_id, celery_task_id=celery_task.id)
+        logger.info(f"Running inference for job {job_id}")
+        run_inference_sync(job_id, scan_id, modality_data)
     except Exception as e:
         gdb.update_job(job_id, status=JobStatus.FAILED.value, error_message=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to start analysis: {str(e)}",
+            detail=f"Inference failed: {str(e)}",
         )
 
     return ImageAnalyzeResponse(
@@ -592,16 +612,11 @@ async def find_similar_cases(tumor_grade: str) -> dict:
 
 @router.post("/training/start")
 async def start_training() -> dict:
-    """Trigger ensemble training via the CLI trainer (synchronous in worker)."""
-    try:
-        from app.workers.celery_worker import celery_app
-        task = celery_app.send_task("app.workers.celery_worker.run_tumor_inference")
-        return {
-            "status": "training_not_available",
-            "message": "Use 'docker compose exec backend python -m app.train' to train models.",
-        }
-    except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to start training: {str(e)}")
+    """Trigger ensemble training via the CLI trainer."""
+    return {
+        "status": "training_not_available",
+        "message": "Use 'python -m app.train' from the backend directory to train models.",
+    }
 
 
 # ── Doctor Endpoints (M:N relationships) ──────────────────────────

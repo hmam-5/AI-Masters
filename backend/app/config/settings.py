@@ -40,8 +40,9 @@ class Settings(BaseSettings):
     data_dir: str = "/data"
     combined_dataset_dir: str = "/data/combined"
 
-    # Storage (MinIO/S3)
-    storage_backend: Literal["minio", "s3"] = "minio"
+    # Storage (MinIO/S3/Local)
+    storage_backend: Literal["minio", "s3", "local"] = "minio"
+    local_storage_dir: str = "./data/uploads"  # Used when storage_backend is "local"
     minio_endpoint: str = "minio:9000"
     minio_access_key: str = "minioadmin"
     minio_secret_key: str = "minioadmin"
@@ -91,6 +92,10 @@ class Settings(BaseSettings):
     # Task Configuration
     celery_task_time_limit: int = 3600  # 1 hour
     celery_task_soft_time_limit: int = 3300  # 55 minutes
+
+    # Local Development Mode
+    use_sync_inference: bool = False  # If True, run inference synchronously (no Celery/Redis needed)
+    skip_falkordb: bool = False  # If True, skip FalkorDB for basic testing (uses in-memory store)
 
     class Config:
         """Pydantic configuration."""

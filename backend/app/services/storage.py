@@ -1,7 +1,7 @@
 """
 Storage service for DICOM/NIfTI file management.
 
-Supports MinIO and AWS S3 backends with encryption and versioning.
+Supports MinIO, AWS S3, and Local Filesystem backends with encryption and versioning.
 """
 
 import io
@@ -41,6 +41,53 @@ class StorageBackend(ABC):
     @abstractmethod
     def list_files(self, prefix: str) -> list[str]:
         """List files by prefix."""
+
+
+class LocalFilesystemBackend(StorageBackend):
+    """Local filesystem storage backend for development and testing."""
+
+    def __init__(self, base_dir: Optional[str] = None) -> None:
+        self.base_dir = Path(base_dir or getattr(settings, "local_storage_dir", None) or "./data/uploads")
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+
+    def upload_file(
+        self,
+        file_path: str,
+        file_content: bytes,
+        content_type: str = "application/octet-stream",
+    ) -> str:
+        """
+        Save file to local filesystem under base_dir.
+        Returns the full path as the storage key.
+        """
+        dest = self.base_dir / file_path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with open(dest, "wb") as f:
+            f.write(file_content)
+        return str(dest)
+
+    def download_file(self, file_path: str) -> bytes:
+        """
+        Read file from local filesystem under base_dir.
+        """
+        path = Path(file_path)
+        if not path.is_absolute():
+            path = self.base_dir / file_path
+        with open(path, "rb") as f:
+            return f.read()
+
+    def delete_file(self, file_path: str) -> None:
+        path = Path(file_path)
+        if not path.is_absolute():
+            path = self.base_dir / file_path
+        if path.exists():
+            path.unlink()
+
+    def list_files(self, prefix: str) -> list[str]:
+        dir_path = self.base_dir / prefix
+        if not dir_path.exists() or not dir_path.is_dir():
+            return []
+        return [str(p) for p in dir_path.rglob("*") if p.is_file()]
 
 
 class MinIOBackend(StorageBackend):
@@ -237,14 +284,18 @@ def get_storage_backend() -> StorageBackend:
     Factory function to get configured storage backend.
 
     Returns:
-        StorageBackend: MinIO or S3 backend based on configuration
+        StorageBackend: MinIO, S3, or LocalFilesystem backend based on configuration
 
     Raises:
         ValueError: If invalid storage backend is configured
     """
-    if settings.storage_backend == "minio":
+    backend = getattr(settings, "storage_backend", "minio")
+    
+    if backend == "minio":
         return MinIOBackend()
-    elif settings.storage_backend == "s3":
+    elif backend == "s3":
         return S3Backend()
+    elif backend == "local":
+        return LocalFilesystemBackend()
     else:
-        raise ValueError(f"Unknown storage backend: {settings.storage_backend}")
+        raise ValueError(f"Unknown storage backend: {backend}")
