@@ -27,6 +27,7 @@
 ## Table of Contents
 
 - [Overview](#overview)
+- [Screenshots](#screenshots)
 - [Prerequisites](#prerequisites)
 - [Option 1 — Docker (Full Stack)](#option-1--docker-full-stack)
 - [Option 2 — Local Development (Recommended for Beginners)](#option-2--local-development-recommended-for-beginners)
@@ -73,6 +74,31 @@ AI Masters is a full-stack diagnostic platform that analyzes brain MRI scans usi
 | **DenseNet-121** | Dense connectivity pattern | 1.3 | Feature reuse, parameter efficiency |
 
 The final prediction uses **weighted logit fusion** with **Test-Time Augmentation** (TTA — original + 3 augmented variants) and temperature scaling (T=0.8) for calibrated, robust predictions.
+
+---
+
+## Screenshots
+
+### Dashboard
+![Dashboard](screenshots/01-dashboard.png)
+
+### Smart Ingestion (Upload)
+![Smart Ingestion](screenshots/02-smart-ingestion.png)
+
+### Pipeline View
+![Pipeline View](screenshots/03-pipeline-view.png)
+
+### Diagnostic Workspace
+![Diagnostic Workspace](screenshots/04-diagnostic-workspace.png)
+
+### AI Chat Assistant
+![AI Chat Assistant](screenshots/05-ai-chat-assistant.png)
+
+### Model Ensemble
+![Model Ensemble](screenshots/06-model-ensemble.png)
+
+### Analysis Results
+![Analysis Results](screenshots/07-analysis-results.png)
 
 ---
 
