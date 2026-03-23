@@ -61,8 +61,8 @@ build/
 .kaggle/
 
 # Data
-models/
-data/
+/models/
+/data/
 *.nii
 *.nii.gz
 *.dcm
